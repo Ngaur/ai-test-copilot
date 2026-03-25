@@ -1,0 +1,36 @@
+# Environment
+.env
+*.env.local
+.claude
+.venv
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+# .venv/
+# venv/
+.pytest_cache/
+*.egg-info/
+
+# Generated artifacts
+artifacts/Samples/
+artifacts/generated_tests/
+artifacts/allure-results/
+artifacts/allure-report/
+backend/data/uploads/*
+backend/data/faiss_index/*
+backend/data/test_data/*
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+
+# IDE
+# .vscode/
+.idea/
+*.DS_Store
+
+# Jupyter
+.ipynb_checkpoints/
+notebooks/.ipynb_checkpoints/

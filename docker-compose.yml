@@ -1,0 +1,22 @@
+version: "3.9"
+
+services:
+  backend:
+    build: ./backend
+    ports:
+      - "8000:8000"
+    env_file: .env
+    volumes:
+      - ./data:/app/data
+      - ./backend/generated_tests:/app/generated_tests
+      - ./backend/allure-results:/app/allure-results
+      - ./backend/allure-report:/app/allure-report
+    environment:
+      - PYTHONPATH=/app
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "5173:80"
+    depends_on:
+      - backend
