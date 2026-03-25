@@ -1,0 +1,36 @@
+# API
+fastapi==0.115.5
+uvicorn[standard]==0.32.0
+python-multipart==0.0.12
+
+# LangChain + LangGraph
+langchain==1.2.12
+langchain-openai==1.1.11
+langchain-ollama==1.0.1
+langchain-community==0.4.1
+langchain-text-splitters==1.1.1
+langgraph==1.1.2
+
+# Vector store
+faiss-cpu==1.13.0
+
+# HTTP client
+httpx[http2]==0.27.2
+
+# Config
+pydantic-settings==2.13.1
+
+# Document parsers
+pypdf==5.1.0
+docx2txt==0.8
+openpyxl==3.1.5
+PyYAML==6.0.2
+
+# Testing + Allure
+pytest==8.3.3
+pytest-asyncio==0.24.0
+pytest-playwright==0.5.2
+allure-pytest==2.13.5
+
+# Utilities
+python-jose[cryptography]==3.3.0
