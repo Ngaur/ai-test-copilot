@@ -33,6 +33,11 @@ from app.agents.prompts import (
     SYSTEM_PROMPT,
     TEST_DATA_SCHEMA_PROMPT,
 )
+from app.agents.response_models import (
+    TestCaseListOutput,
+    TestDataColumn,
+    TestDataSchemaOutput,
+)
 from app.agents.state import TestCopilotState
 from app.rag import vector_store as vs
 from app.rag.ingestor import build_api_metadata_map, ingest_file
@@ -244,6 +249,7 @@ def _batch_generate_test_cases(
         api_metadata_json = json.dumps(batch_metadata, indent=2) if batch_metadata else "(not available)"
 
         test_data_json = json.dumps(test_data, indent=2) if test_data else "(none)"
+        structured_llm = llm.with_structured_output(TestCaseListOutput)
         prompt = GENERATE_TESTS_BATCH_PROMPT.format(
             endpoint_list=endpoint_list,
             rag_context=context,
@@ -251,8 +257,10 @@ def _batch_generate_test_cases(
             context_summary=context_summary or "(none provided)",
             test_data=test_data_json,
         )
-        response = llm.invoke([SystemMessage(content=SYSTEM_PROMPT), HumanMessage(content=prompt)])
-        batch_cases = _parse_llm_json(response.content)
+        result: TestCaseListOutput = structured_llm.invoke(
+            [SystemMessage(content=SYSTEM_PROMPT), HumanMessage(content=prompt)]
+        )
+        batch_cases = [tc.model_dump() for tc in result.test_cases]
         for tc in batch_cases:
             tc["id"] = f"TC-{id_counter:03d}"
             id_counter += 1
@@ -265,8 +273,11 @@ def _batch_generate_test_cases(
 def _single_generate_test_cases(rag_context: str, llm) -> list[dict]:
     """Fallback single-call generation for unstructured docs (PDF, DOCX, text)."""
     prompt = GENERATE_TESTS_PROMPT.format(rag_context=rag_context)
-    response = llm.invoke([SystemMessage(content=SYSTEM_PROMPT), HumanMessage(content=prompt)])
-    return _parse_llm_json(response.content)
+    structured_llm = llm.with_structured_output(TestCaseListOutput)
+    result: TestCaseListOutput = structured_llm.invoke(
+        [SystemMessage(content=SYSTEM_PROMPT), HumanMessage(content=prompt)]
+    )
+    return [tc.model_dump() for tc in result.test_cases]
 
 
 def _generate_workflow_test_cases(
@@ -305,8 +316,11 @@ def _generate_workflow_test_cases(
         context_summary=context_summary or "(none provided)",
         test_data=test_data_json,
     )
-    response = llm.invoke([SystemMessage(content=SYSTEM_PROMPT), HumanMessage(content=prompt)])
-    workflow_cases = _parse_llm_json(response.content)
+    structured_llm = llm.with_structured_output(TestCaseListOutput)
+    result: TestCaseListOutput = structured_llm.invoke(
+        [SystemMessage(content=SYSTEM_PROMPT), HumanMessage(content=prompt)]
+    )
+    workflow_cases = [tc.model_dump() for tc in result.test_cases]
 
     for tc in workflow_cases:
         tc["id"] = f"TC-{start_id:03d}"
@@ -427,8 +441,11 @@ def improve_test_cases(state: TestCopilotState) -> dict[str, Any]:
         feedback=feedback,
         rag_context=rag_context,
     )
-    response = llm.invoke([SystemMessage(content=SYSTEM_PROMPT), HumanMessage(content=prompt)])
-    updated_cases = _parse_llm_json(response.content) or state["manual_test_cases"]
+    structured_llm = llm.with_structured_output(TestCaseListOutput)
+    result: TestCaseListOutput = structured_llm.invoke(
+        [SystemMessage(content=SYSTEM_PROMPT), HumanMessage(content=prompt)]
+    )
+    updated_cases = [tc.model_dump() for tc in result.test_cases] or state["manual_test_cases"]
 
     iteration = state.get("review_iteration", 0) + 1
     msg = (
@@ -484,10 +501,11 @@ def _suggest_test_data_schema(test_cases: list[dict], endpoints_summary: list[di
         ep = tc.get("endpoint", "UNKNOWN")
         endpoint_groups.setdefault(ep, []).append(tc)
 
-    # Accumulate columns: name -> column dict (insertion order = merge order)
+    # Accumulate columns: name -> TestDataColumn (insertion order = merge order)
     # Note: test_case_id is intentionally excluded — users provide plain rows of field values;
     # the automation layer decides which rows apply to positive vs negative test cases.
-    merged: dict[str, dict] = {}
+    merged: dict[str, TestDataColumn] = {}
+    structured_llm = llm.with_structured_output(TestDataSchemaOutput)
 
     for endpoint, tcs in endpoint_groups.items():
         body_fields = ep_body_lookup.get(endpoint, [])
@@ -497,13 +515,12 @@ def _suggest_test_data_schema(test_cases: list[dict], endpoints_summary: list[di
             test_cases=json.dumps(tcs, indent=2),
         )
         try:
-            response = llm.invoke([SystemMessage(content=SYSTEM_PROMPT), HumanMessage(content=prompt)])
-            cols = _parse_llm_json(response.content)
-            if isinstance(cols, list):
-                for col in cols:
-                    name = col.get("name", "").strip()
-                    if name and name not in merged:
-                        merged[name] = col
+            result = structured_llm.invoke(
+                [SystemMessage(content=SYSTEM_PROMPT), HumanMessage(content=prompt)]
+            )
+            for col in result.columns:  # type: ignore[union-attr]
+                if col.name and col.name not in merged:
+                    merged[col.name] = col
         except Exception as exc:
             logger.warning("Schema LLM call failed for %s: %s", endpoint, exc)
 
@@ -515,14 +532,16 @@ def _suggest_test_data_schema(test_cases: list[dict], endpoints_summary: list[di
             for param in re.findall(r"\{(\w+)\}", tc.get("endpoint", "")):
                 if param not in seen_p:
                     seen_p.add(param)
-                    merged[param] = {"name": param, "type": "string/integer",
-                                     "example": "example-id", "required": True}
+                    merged[param] = TestDataColumn(
+                        name=param, type="string/integer", example="example-id", required=True
+                    )
         for ep_info in (endpoints_summary or []):
             if ep_info.get("method", "").upper() in {"POST", "PUT", "PATCH"}:
                 for field in ep_info.get("body_fields", []):
                     if field not in merged:
-                        merged[field] = {"name": field, "type": "string",
-                                         "example": f"{field}_value", "required": False}
+                        merged[field] = TestDataColumn(
+                            name=field, type="string", example=f"{field}_value", required=False
+                        )
 
     # Build markdown table + sample JSON from merged columns
     header    = "| Column | Type | Example | Required |"
@@ -530,9 +549,9 @@ def _suggest_test_data_schema(test_cases: list[dict], endpoints_summary: list[di
     rows:   list[str] = []
     sample: dict[str, str] = {}
     for name, col in merged.items():
-        req = "Yes" if col.get("required") else "No"
-        ex  = col.get("example", "")
-        rows.append(f"| `{name}` | {col.get('type', 'string')} | {ex} | {req} |")
+        req = "Yes" if col.required else "No"
+        ex  = col.example
+        rows.append(f"| `{name}` | {col.type} | {ex} | {req} |")
         sample[name] = ex
 
     table       = "\n".join([header, separator] + rows)
@@ -665,7 +684,7 @@ def generate_feature_files(g: Any, config: dict, state_values: dict) -> None:
         )
         try:
             response = llm.invoke([SystemMessage(content=SYSTEM_PROMPT), HumanMessage(content=prompt)])
-            content = response.content.strip()
+            content = str(response.content).strip()
             # Strip markdown code fences if the LLM wrapped the output
             if content.startswith("```"):
                 lines = content.split("\n")
@@ -780,7 +799,7 @@ def api_request_context(playwright: Playwright, base_url: str):
         )
         try:
             resp = llm.invoke([SystemMessage(content=SYSTEM_PROMPT), HumanMessage(content=prompt)])
-            funcs = resp.content.strip()
+            funcs = str(resp.content).strip()
             # Strip markdown fences if LLM wrapped output
             if funcs.startswith("```"):
                 lines = funcs.split("\n")

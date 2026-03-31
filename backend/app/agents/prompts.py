@@ -75,7 +75,7 @@ When a field from step N is used in step N+1, say so explicitly:
 
 _OUTPUT_FORMAT = """
 ## Output Format
-Return ONLY a valid JSON array. Each element must follow this schema exactly:
+Each test case must follow this schema exactly (return all cases in the test_cases list):
 {{
   "id": "TC-001",
   "title": "<short action-oriented title — describes what is being tested, not just the endpoint>",
@@ -404,7 +404,7 @@ Generate comprehensive manual test cases covering ALL of the following for each 
 """
     + _ASSERTION_QUALITY_RULES
     + _OUTPUT_FORMAT
-    + "\nGenerate all test cases now. Return only the JSON array, no markdown, no explanation.\n"
+    + "\nGenerate all test cases now.\n"
 )
 
 GENERATE_TESTS_BATCH_PROMPT = (
@@ -453,7 +453,7 @@ If the "Test Data" section above contains actual rows (it is NOT "(none)"):
 """
     + _ASSERTION_QUALITY_RULES
     + _OUTPUT_FORMAT
-    + "\nGenerate test cases for ALL endpoints in this batch. Return only the JSON array, no markdown, no explanation.\n"
+    + "\nGenerate test cases for ALL endpoints in this batch.\n"
 )
 
 GENERATE_WORKFLOW_PROMPT = (
@@ -510,7 +510,7 @@ Cover ALL of the following scenario types across your {n_workflows} test cases:
     + _ASSERTION_QUALITY_RULES
     + """
 ## Output Format
-Return ONLY a valid JSON array. Each element must follow this schema:
+Each element must follow this schema (return all cases in the test_cases list):
 {{
   "id": "TC-W01",
   "title": "<workflow-oriented title, e.g. 'Create user then attempt access after deletion'>",
@@ -538,7 +538,7 @@ Return ONLY a valid JSON array. Each element must follow this schema:
   "notes": "<which APIs are chained, what data flows between steps, what application behaviour is being validated>"
 }}
 
-Return only the JSON array. No markdown, no explanation.
+Return all workflow test cases in the test_cases list.
 """
 )
 
@@ -566,7 +566,7 @@ While updating, also deepen any shallow assertions you find:
 - If steps are vague (e.g. "verify response is correct"), make them concrete with field names and values
 - Apply the same standard as if generating these test cases fresh
 
-Return ONLY the complete updated JSON array of test cases. No explanation, no markdown.
+Return all test cases (updated and unchanged) in the test_cases list.
 """
 
 CLARIFICATION_PROMPT = """Based on the uploaded API specification, I need some additional context
@@ -601,14 +601,11 @@ Rules:
 - All column names must be snake_case
 
 ## Output
-Return ONLY a JSON array. No markdown fences, no explanation.
-Each element must have exactly these keys: "name", "type", "example", "required" (boolean).
-
-Example:
-[
-  {{"name": "email", "type": "string", "example": "user@example.com", "required": true}},
-  {{"name": "password", "type": "string", "example": "Pass@123", "required": true}}
-]"""
+Return all columns in the columns list. Each column must have:
+- name (snake_case string)
+- type (data type string, e.g. string, integer, boolean)
+- example (representative value string)
+- required (boolean)"""
 
 GENERATE_SINGLE_TEST_PROMPT = """Generate a single Playwright Python API test function for the test case below.
 

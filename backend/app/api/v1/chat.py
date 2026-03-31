@@ -84,7 +84,12 @@ async def start_session(session_id: str, background_tasks: BackgroundTasks, g=De
     config = _config(thread_id)
 
     upload_path = Path(settings.upload_dir) / session_id
-    files = list(upload_path.glob("*")) if upload_path.exists() else []
+    files = []
+    
+    files = [
+        f for f in upload_path.glob("*")
+        if f.is_file()
+    ]
     if not files:
         raise HTTPException(status_code=404, detail="No uploaded file found for this session.")
 
