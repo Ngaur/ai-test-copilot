@@ -46,3 +46,12 @@ export interface Session {
   status: SessionStatus;
   filename: string;
 }
+
+export interface PastSession {
+  session_id: string;
+  filename: string;
+  created_at: string;
+  updated_at: string;
+  has_feature_files: boolean;
+  has_playwright: boolean;
+}

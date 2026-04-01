@@ -95,6 +95,13 @@ async def start_session(session_id: str, background_tasks: BackgroundTasks, g=De
 
     file_path = str(files[0])
 
+    # Register the session in the persistent registry so it appears in session history.
+    try:
+        from app.services.session_registry import registry as _registry
+        _registry.upsert_session(session_id=session_id, filename=files[0].name)
+    except Exception:
+        logger.warning("Failed to register session %s in registry", session_id)
+
     initial_state = {
         "messages": [HumanMessage(content="Start generating test cases from the uploaded file.")],
         "session_id": session_id,
@@ -216,6 +223,19 @@ async def submit_review(
         )
 
     # Approval path:
+    # Save approved test cases to the persistent registry before the graph advances,
+    # so they survive server restarts and are available in session history.
+    try:
+        from app.services.session_registry import registry as _registry
+        _pre = g.get_state(config)
+        if _pre:
+            _registry.save_test_cases(
+                session_id=_pre.values.get("session_id", ""),
+                test_cases=_pre.values.get("manual_test_cases", []),
+            )
+    except Exception:
+        logger.warning("Failed to save test cases to registry for thread %s", thread_id)
+
     #   Pass 1: resumes human_review → pauses before request_test_data
     list(g.stream(None, config=config, stream_mode="values"))
     #   Pass 2: runs request_test_data

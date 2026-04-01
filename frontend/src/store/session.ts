@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import type { ChatMessage, Session, SessionStatus, TestCase } from "@/types";
+import type { ChatMessage, PastSession, Session, SessionStatus, TestCase } from "@/types";
 
 export interface GenerationProgress {
   current: number;
@@ -14,6 +14,8 @@ interface SessionStore {
   testCases: TestCase[];
   isLoading: boolean;
   generationProgress: GenerationProgress | null;
+  // Session history — persists across active-session resets
+  viewingSession: PastSession | null;
 
   setSession: (s: Session) => void;
   updateStatus: (status: SessionStatus) => void;
@@ -22,6 +24,7 @@ interface SessionStore {
   setTestCases: (tcs: TestCase[]) => void;
   setLoading: (v: boolean) => void;
   setGenerationProgress: (p: GenerationProgress | null) => void;
+  setViewingSession: (s: PastSession | null) => void;
   reset: () => void;
 }
 
@@ -31,6 +34,7 @@ export const useSessionStore = create<SessionStore>((set) => ({
   testCases: [],
   isLoading: false,
   generationProgress: null,
+  viewingSession: null,
 
   setSession: (s) => set({ session: s }),
   updateStatus: (status) =>
@@ -48,6 +52,8 @@ export const useSessionStore = create<SessionStore>((set) => ({
   setTestCases: (tcs) => set({ testCases: tcs }),
   setLoading: (v) => set({ isLoading: v }),
   setGenerationProgress: (p) => set({ generationProgress: p }),
+  setViewingSession: (viewingSession) => set({ viewingSession }),
+  // reset clears the active session but NOT viewingSession (history survives new-session clicks)
   reset: () =>
-    set({ session: null, messages: [], testCases: [], isLoading: false, generationProgress: null }),
+    set({ session: null, messages: [], testCases: [], isLoading: false, generationProgress: null, viewingSession: null }),
 }));

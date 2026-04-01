@@ -9,11 +9,12 @@ import ReviewPanel from "@/components/HumanReview/ReviewPanel";
 import PlaywrightConfirmPanel from "@/components/GeneratedTest/PlaywrightConfirmPanel";
 import ReportViewer from "@/components/Report/ReportViewer";
 import Sidebar from "@/components/Sidebar/Sidebar";
+import SessionViewer from "@/components/SessionViewer/SessionViewer";
 import TestCaseTable from "@/components/TestCases/TestCaseTable";
 import ContextUpload from "@/components/ContextUpload/ContextUpload";
 import TestDataUpload from "@/components/TestDataUpload/TestDataUpload";
 import { useSessionStore } from "@/store/session";
-import type { SessionStatus } from "@/types";
+import type { PastSession, SessionStatus } from "@/types";
 
 // Parses "**3/15** — Generated: *Add user*" → gherkin phase progress
 // Parses "**3/15** — Playwright: *Add user*" → playwright phase progress
@@ -70,7 +71,7 @@ const STEP_PROGRESS: Partial<Record<string, string>> = {
 };
 
 export default function Home() {
-  const { session, setSession, updateStatus, updateThreadId, addMessage, isLoading, setLoading, setGenerationProgress, reset } =
+  const { session, setSession, updateStatus, updateThreadId, addMessage, isLoading, setLoading, setGenerationProgress, reset, viewingSession, setViewingSession } =
     useSessionStore();
   const queryClient = useQueryClient();
   const [showUpload, setShowUpload] = useState(false);
@@ -142,6 +143,8 @@ export default function Home() {
                 queryClient.invalidateQueries({ queryKey: ["test-cases", threadId] });
               }
               if (s.current_step === "ready_to_execute") {
+                // Refresh sidebar history list now that artifacts are on disk
+                queryClient.invalidateQueries({ queryKey: ["past-sessions"] });
                 // Switch to Playwright tab if Playwright tests were generated, otherwise Feature Files
                 if (s.last_message?.includes("Playwright test suite generated")) {
                   setRightTab("playwright");
@@ -268,21 +271,33 @@ export default function Home() {
 
   const handleNewSession = () => {
     stopPolling();
-    reset();
+    reset();             // also clears viewingSession (see store)
     setShowUpload(false);
     setShowTestDataUpload(false);
     setPendingSession(null);
     setRightTab("manual");
   };
 
+  const handleSelectPastSession = useCallback(
+    (past: PastSession) => {
+      setViewingSession(past);
+    },
+    [setViewingSession],
+  );
+
   return (
     <div className="flex h-screen bg-surface overflow-hidden">
       {/* Sidebar */}
-      <Sidebar onNewSession={handleNewSession} />
+      <Sidebar onNewSession={handleNewSession} onSelectPastSession={handleSelectPastSession} />
 
       {/* Main area */}
       <div className="flex flex-1 overflow-hidden">
-        {!session ? (
+        {viewingSession ? (
+          /* ── Past session viewer — full width, independent of active session ── */
+          <div className="flex-1 overflow-hidden bg-surface flex flex-col">
+            <SessionViewer session={viewingSession} />
+          </div>
+        ) : !session ? (
           /* ── Welcome / Upload screen ── */
           <div className="flex-1 flex flex-col items-center justify-center gap-8 p-8 animate-fade-in">
             <div className="text-center">
@@ -298,8 +313,9 @@ export default function Home() {
             <FileUpload onUploaded={handleUploaded} isLoading={isLoading} />
           </div>
         ) : (
+          /* ── Active session: chat panel + right panel ── */
           <>
-            {/* ── Chat panel ── */}
+            {/* Chat panel */}
             <div className="w-[420px] flex-shrink-0 flex flex-col border-r border-border">
               {/* Chat header */}
               <div className="flex items-center gap-3 px-4 py-3 border-b border-border flex-shrink-0">
@@ -327,7 +343,7 @@ export default function Home() {
               {!pendingSession && <ReportViewer />}
             </div>
 
-            {/* ── Right panel: Manual tests / Automated code ── */}
+            {/* Right panel: Manual tests / Automated code */}
             <div className="flex-1 overflow-hidden bg-surface flex flex-col">
               {/* Tab bar */}
               <div className="flex border-b border-border flex-shrink-0">

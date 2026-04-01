@@ -141,3 +141,27 @@ class ExecutionStatusResponse(BaseModel):
     errors: int = 0
     report_url: str | None = None
     log_lines: list[str] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Session History
+# ---------------------------------------------------------------------------
+
+class PastSession(BaseModel):
+    session_id: str
+    filename: str
+    created_at: str
+    updated_at: str
+    has_feature_files: bool
+    has_playwright: bool
+
+
+class PastSessionTestCasesResponse(BaseModel):
+    session_id: str
+    count: int
+    test_cases: list[TestCase]
+
+
+class PastSessionContentResponse(BaseModel):
+    session_id: str
+    content: str

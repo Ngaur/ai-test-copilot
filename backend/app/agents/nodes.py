@@ -721,6 +721,13 @@ def generate_feature_files(g: Any, config: dict, state_values: dict) -> None:
         ))],
     })
 
+    # Mark feature files as ready in the session registry for history retrieval.
+    try:
+        from app.services.session_registry import registry as _registry
+        _registry.mark_has_feature_files(state_values.get("session_id", ""))
+    except Exception:
+        pass
+
 
 def generate_playwright_tests(g: Any, config: dict, state_values: dict) -> None:
     """
@@ -831,6 +838,13 @@ def api_request_context(playwright: Playwright, base_url: str):
             "then click **Run Tests**."
         ))],
     })
+
+    # Mark Playwright test as ready in the session registry for history retrieval.
+    try:
+        from app.services.session_registry import registry as _registry
+        _registry.mark_has_playwright(state_values.get("session_id", ""))
+    except Exception:
+        pass
 
 
 # Keep old name as an alias so any external callers don't break immediately
