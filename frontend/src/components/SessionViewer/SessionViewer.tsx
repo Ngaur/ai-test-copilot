@@ -84,7 +84,7 @@ function TestCaseRow({ tc }: { tc: TestCase }) {
       </tr>
 
       {expanded && (
-        <tr className="border-b border-border bg-[#1a1a1a]">
+        <tr className="border-b border-border bg-surface">
           <td colSpan={6} className="px-5 py-4">
             <div className="space-y-3 text-xs">
               {tc.preconditions.length > 0 && (
@@ -300,7 +300,7 @@ export default function SessionViewer({ session }: Props) {
           title={!session.has_feature_files ? "Not generated in this session" : undefined}
           className={`px-4 py-2.5 text-xs font-medium transition-colors flex items-center gap-1.5 disabled:opacity-40 disabled:cursor-not-allowed ${
             tab === "features"
-              ? "text-green-400 border-b-2 border-green-400 -mb-px"
+              ? "text-text-primary border-b-2 border-text-primary -mb-px"
               : "text-text-muted hover:text-text-secondary"
           }`}
         >
@@ -315,7 +315,7 @@ export default function SessionViewer({ session }: Props) {
           title={!session.has_playwright ? "Not generated in this session" : undefined}
           className={`px-4 py-2.5 text-xs font-medium transition-colors flex items-center gap-1.5 disabled:opacity-40 disabled:cursor-not-allowed ${
             tab === "playwright"
-              ? "text-purple-400 border-b-2 border-purple-400 -mb-px"
+              ? "text-text-primary border-b-2 border-text-primary -mb-px"
               : "text-text-muted hover:text-text-secondary"
           }`}
         >
@@ -387,7 +387,7 @@ export default function SessionViewer({ session }: Props) {
           <CodePanel
             content={featureQuery.data?.content}
             isLoading={featureQuery.isLoading}
-            color="text-green-300"
+            color="text-text-primary"
             placeholder="Feature files not available for this session."
           />
         )}
@@ -396,7 +396,7 @@ export default function SessionViewer({ session }: Props) {
           <CodePanel
             content={playwrightQuery.data?.content}
             isLoading={playwrightQuery.isLoading}
-            color="text-purple-200"
+            color="text-text-primary"
             placeholder="Playwright tests not available for this session."
           />
         )}

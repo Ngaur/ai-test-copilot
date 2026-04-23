@@ -8,7 +8,7 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
     )
 
-    app_name: str = "AI Test Copilot"
+    app_name: str = "APITests.ai"
     debug: bool = False
 
     # Deployment mode

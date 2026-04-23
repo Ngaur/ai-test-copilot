@@ -17,4 +17,4 @@ def setup_logging(debug: bool = False) -> None:
     root.setLevel(level)
 
 
-logger = logging.getLogger("ai_test_copilot")
+logger = logging.getLogger("apitests_ai")

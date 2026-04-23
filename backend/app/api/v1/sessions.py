@@ -1,14 +1,15 @@
 """
-Read-only sessions history API.
+Sessions history API.
 
 All data is sourced from the SQLite session registry or the filesystem — these
 endpoints do NOT touch LangGraph's in-memory state, so they work even after a
 server restart.
 
-GET /sessions                              → list recent sessions (metadata only)
-GET /sessions/{session_id}/test-cases      → saved manual test cases from registry
-GET /sessions/{session_id}/feature-files   → Gherkin .feature file content from disk
-GET /sessions/{session_id}/playwright-test → test_generated.py content from disk
+GET    /sessions                              → list recent sessions (metadata only)
+DELETE /sessions/{session_id}                 → delete a session from registry
+GET    /sessions/{session_id}/test-cases      → saved manual test cases from registry
+GET    /sessions/{session_id}/feature-files   → Gherkin .feature file content from disk
+GET    /sessions/{session_id}/playwright-test → test_generated.py content from disk
 """
 from __future__ import annotations
 
@@ -47,6 +48,21 @@ async def list_sessions():
         )
         for r in rows
     ]
+
+
+# ---------------------------------------------------------------------------
+# DELETE /sessions/{session_id}
+# ---------------------------------------------------------------------------
+
+@router.delete("/sessions/{session_id}")
+async def delete_session(session_id: str):
+    """Remove a session from the registry (test cases included). Disk files are kept."""
+    if not registry.session_exists(session_id):
+        raise HTTPException(status_code=404, detail="Session not found.")
+    deleted = registry.delete_session(session_id)
+    if not deleted:
+        raise HTTPException(status_code=500, detail="Failed to delete session.")
+    return {"ok": True, "session_id": session_id}
 
 
 # ---------------------------------------------------------------------------

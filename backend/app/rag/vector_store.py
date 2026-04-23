@@ -14,7 +14,7 @@ from langchain_core.documents import Document
 from app.core.config import settings
 from app.services.llm_service import get_embeddings
 
-logger = logging.getLogger("ai_test_copilot.vector_store")
+logger = logging.getLogger("apitests_ai.vector_store")
 
 _stores: dict[str, FAISS] = {}
 

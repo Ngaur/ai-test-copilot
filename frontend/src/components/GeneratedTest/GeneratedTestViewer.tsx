@@ -44,7 +44,7 @@ export default function GeneratedTestViewer() {
         <Code2 size={14} className="text-accent" />
         <span className="text-xs font-mono text-text-muted truncate">{data.file_path.split("/").pop()}</span>
       </div>
-      <pre className="flex-1 overflow-auto scrollbar-thin text-[12px] font-mono leading-relaxed text-green-300 bg-[#0d0d0d] p-4 m-0">
+      <pre className="flex-1 overflow-auto scrollbar-thin text-[12px] font-mono leading-relaxed text-text-primary bg-surface p-4 m-0">
         {data.content}
       </pre>
     </div>

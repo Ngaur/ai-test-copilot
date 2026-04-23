@@ -16,7 +16,7 @@ from typing import Any
 
 import httpx
 
-logger = logging.getLogger("ai_test_copilot.jira")
+logger = logging.getLogger("apitests_ai.jira")
 
 # ---------------------------------------------------------------------------
 # Config model (stored in data/jira_config.json)

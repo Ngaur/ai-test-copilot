@@ -50,6 +50,9 @@ class TestCopilotState(TypedDict):
     execution_log: list[str]
     allure_report_url: str | None
 
+    # Intake questionnaire (collected after indexing, before generation)
+    questionnaire_answers: dict[str, Any]
+
     # Flow control
     current_step: str
     error_message: str | None

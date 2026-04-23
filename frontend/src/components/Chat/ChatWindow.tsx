@@ -56,7 +56,7 @@ export default function ChatWindow({ onFileUploadClick }: Props) {
               <span className="text-2xl">🧪</span>
             </div>
             <div className="text-center">
-              <p className="text-text-primary font-semibold text-lg">AI Test Copilot</p>
+              <p className="text-text-primary font-semibold text-lg">APITests.ai</p>
               <p className="text-text-secondary text-sm mt-1 max-w-sm">
                 Upload a Postman collection or API spec to generate comprehensive test cases automatically.
               </p>

@@ -1,5 +1,5 @@
 """
-Pydantic response models for all LLM structured outputs in the AI Test Copilot workflow.
+Pydantic response models for all LLM structured outputs in the APITests.ai workflow.
 
 Each model maps to a specific generation node:
   - TestCaseListOutput   → generate_test_cases, improve_test_cases, workflow generation

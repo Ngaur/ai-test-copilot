@@ -1,5 +1,5 @@
 """
-LangGraph node functions for the AI Test Copilot workflow.
+LangGraph node functions for the APITests.ai workflow.
 
 Flow:
   ingest_and_index
@@ -43,7 +43,7 @@ from app.rag import vector_store as vs
 from app.rag.ingestor import build_api_metadata_map, ingest_file
 from app.services.llm_service import get_llm
 
-logger = logging.getLogger("ai_test_copilot.nodes")
+logger = logging.getLogger("apitests_ai.nodes")
 
 
 # ---------------------------------------------------------------------------
@@ -223,6 +223,7 @@ def _batch_generate_test_cases(
     api_metadata_map: dict = None,
     context_summary: str = "",
     test_data: list[dict] = None,
+    questionnaire: str = "",
 ) -> list[dict]:
     """
     Generate test cases in endpoint-sized batches so every endpoint is covered,
@@ -255,6 +256,7 @@ def _batch_generate_test_cases(
             rag_context=context,
             api_metadata=api_metadata_json,
             context_summary=context_summary or "(none provided)",
+            questionnaire=questionnaire or "(none provided)",
             test_data=test_data_json,
         )
         result: TestCaseListOutput = structured_llm.invoke(
@@ -286,6 +288,7 @@ def _generate_workflow_test_cases(
     start_id: int,
     context_summary: str = "",
     test_data: list[dict] = None,
+    questionnaire: str = "",
 ) -> list[dict]:
     """
     Generate cross-API end-to-end workflow test cases after per-endpoint batch generation.
@@ -314,6 +317,7 @@ def _generate_workflow_test_cases(
         context_sample=context_sample,
         n_workflows=n_workflows,
         context_summary=context_summary or "(none provided)",
+        questionnaire=questionnaire or "(none provided)",
         test_data=test_data_json,
     )
     structured_llm = llm.with_structured_output(TestCaseListOutput)
@@ -328,6 +332,161 @@ def _generate_workflow_test_cases(
 
     logger.info("Workflow generation produced %d test cases", len(workflow_cases))
     return workflow_cases
+
+
+# ---------------------------------------------------------------------------
+# Node: collect_questionnaire
+# ---------------------------------------------------------------------------
+
+def _format_questionnaire_for_context(answers: dict) -> str:
+    """
+    Convert the structured questionnaire answers dict into a readable text block
+    for injection into generation prompts.
+    """
+    lines: list[str] = ["## Intake Questionnaire Answers\n"]
+
+    # Section 1: API Identity
+    s1 = answers.get("s1", {})
+    if any(s1.values()):
+        lines.append("### API Identity")
+        if s1.get("product_name"):
+            lines.append(f"- Product / API name: {s1['product_name']}")
+        if s1.get("auth_type"):
+            lines.append(f"- Authentication: {s1['auth_type']}")
+        if s1.get("base_url"):
+            lines.append(f"- Test environment base URL: {s1['base_url']}")
+        if s1.get("user_roles"):
+            roles = s1["user_roles"] if isinstance(s1["user_roles"], list) else [s1["user_roles"]]
+            lines.append(f"- User roles: {', '.join(roles)}")
+        lines.append("")
+
+    # Section 2: Critical Endpoints
+    s2 = answers.get("s2", {})
+    if s2.get("p1_endpoints"):
+        endpoints = s2["p1_endpoints"] if isinstance(s2["p1_endpoints"], list) else [s2["p1_endpoints"]]
+        if endpoints:
+            lines.append("### P1-Critical Endpoints (generate more depth for these)")
+            for ep in endpoints:
+                lines.append(f"- {ep}")
+            lines.append("")
+    if s2.get("error_codes"):
+        ec = s2["error_codes"]
+        if any(ec.values()):
+            lines.append("### Error Code Mapping")
+            for category, code in ec.items():
+                if code:
+                    lines.append(f"- {category}: HTTP {code}")
+            lines.append("")
+    if s2.get("idempotent_endpoints"):
+        idems = s2["idempotent_endpoints"] if isinstance(s2["idempotent_endpoints"], list) else [s2["idempotent_endpoints"]]
+        if idems:
+            lines.append("### Idempotent Endpoints (duplicate-call tests should expect 2xx not 409)")
+            for ep in idems:
+                lines.append(f"- {ep}")
+            lines.append("")
+
+    # Section 3: Business Rules
+    s3 = answers.get("s3", {})
+    if s3.get("validation_rules"):
+        lines.append("### Business Validation Rules")
+        lines.append(s3["validation_rules"].strip())
+        lines.append("")
+    if s3.get("pii_fields"):
+        fields = s3["pii_fields"] if isinstance(s3["pii_fields"], list) else [s3["pii_fields"]]
+        if fields:
+            lines.append(f"### PII / Sensitive Fields (must NEVER appear in API responses): {', '.join(fields)}")
+            lines.append("")
+    if s3.get("data_constraints"):
+        lines.append("### Additional Data Constraints")
+        lines.append(s3["data_constraints"].strip())
+        lines.append("")
+
+    # Section 4: Workflow Journeys
+    s4 = answers.get("s4", {})
+    journeys = s4.get("user_journeys", [])
+    if journeys:
+        lines.append("### User Journeys (use these as the basis for E2E workflow test cases)")
+        for i, j in enumerate(journeys, 1):
+            if j.get("name") or j.get("steps"):
+                lines.append(f"\nJourney {i} — \"{j.get('name', 'Unnamed')}\"")
+                if j.get("goal"):
+                    lines.append(f"  Goal: {j['goal']}")
+                if j.get("steps"):
+                    lines.append(f"  Steps: {j['steps']}")
+        lines.append("")
+    if s4.get("state_machines"):
+        lines.append("### Resource State Machines")
+        lines.append(s4["state_machines"].strip())
+        lines.append("")
+    if s4.get("failure_scenarios"):
+        lines.append("### Known Multi-Step Failure Scenarios")
+        lines.append(s4["failure_scenarios"].strip())
+        lines.append("")
+
+    # Section 5: Test Preferences
+    s5 = answers.get("s5", {})
+    if s5.get("test_types"):
+        types = s5["test_types"] if isinstance(s5["test_types"], list) else [s5["test_types"]]
+        if types:
+            lines.append(f"### Priority Test Types: {', '.join(types)}")
+    if s5.get("negative_pct"):
+        lines.append(f"### Negative/Edge Case Target: {s5['negative_pct']}% of total test cases")
+    if s5.get("custom_tags"):
+        tags = s5["custom_tags"] if isinstance(s5["custom_tags"], list) else [s5["custom_tags"]]
+        if tags:
+            lines.append(f"### Custom Gherkin Tags: {', '.join(tags)}")
+
+    return "\n".join(lines)
+
+
+def collect_questionnaire(state: TestCopilotState) -> dict[str, Any]:
+    """
+    Interrupt node: waits for the user to fill the intake questionnaire.
+    First pass → sets current_step='awaiting_questionnaire' so the frontend renders the panel.
+    After the user submits, the /questionnaire endpoint calls g.update_state() to push
+    answers into state and resumes the graph; this node then formats the answers into
+    context_summary and signals progression to generate_test_cases.
+    """
+    answers = state.get("questionnaire_answers") or {}
+
+    if answers:
+        # Questionnaire submitted — format and augment context_summary
+        formatted = _format_questionnaire_for_context(answers)
+        existing_summary = state.get("context_summary") or ""
+        combined_summary = (existing_summary + "\n\n" + formatted).strip()
+        return {
+            "current_step": "generating",
+            "context_summary": combined_summary,
+        }
+
+    # First pass — no answers yet, display prompt and endpoint list
+    endpoints_summary = state.get("endpoints_summary", [])
+    ep_count = len(endpoints_summary)
+    ep_list = "\n".join(
+        f"- {ep['method']} {ep['endpoint']}"
+        for ep in endpoints_summary
+    )
+
+    if ep_count:
+        msg = (
+            f"Indexed **{ep_count} endpoints**. Before generating tests, I have a few "
+            "questions to help produce higher-quality, business-aware test cases.\n\n"
+            "Fill the questionnaire on the right — every question is optional, skip "
+            "anything you don't want to answer, or click **Generate Tests** to proceed "
+            "with defaults.\n\n"
+            f"**Discovered endpoints:**\n{ep_list}"
+        )
+    else:
+        msg = (
+            "Spec indexed. Before generating tests, I have a few questions to help "
+            "produce higher-quality test cases.\n\n"
+            "Fill the questionnaire on the right — every question is optional."
+        )
+
+    return {
+        "current_step": "awaiting_questionnaire",
+        "messages": [AIMessage(content=msg)],
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -353,13 +512,18 @@ def generate_test_cases(state: TestCopilotState) -> dict[str, Any]:
         api_metadata_map = state.get("api_metadata_map", {})
         context_summary = state.get("context_summary", "")
         test_data: list[dict] = state.get("test_data", [])
+        questionnaire_answers = state.get("questionnaire_answers") or {}
+        questionnaire_text = _format_questionnaire_for_context(questionnaire_answers) if questionnaire_answers else ""
         if test_data:
             logger.info("Early test data available (%d rows) — injecting into test case generation", len(test_data))
+        if questionnaire_answers:
+            logger.info("Questionnaire answers present — injecting into test case generation")
         test_cases = _batch_generate_test_cases(
             endpoints_summary, llm,
             api_metadata_map=api_metadata_map,
             context_summary=context_summary,
             test_data=test_data or None,
+            questionnaire=questionnaire_text,
         )
 
         # Second pass: cross-API workflow / E2E test cases
@@ -368,6 +532,7 @@ def generate_test_cases(state: TestCopilotState) -> dict[str, Any]:
             start_id=len(test_cases) + 1,
             context_summary=context_summary,
             test_data=test_data or None,
+            questionnaire=questionnaire_text,
         )
         test_cases.extend(workflow_cases)
 

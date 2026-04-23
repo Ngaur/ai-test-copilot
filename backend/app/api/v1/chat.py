@@ -30,6 +30,7 @@ from app.core.logging import logger
 from app.models.schemas import (
     ChatRequest,
     HumanReviewRequest,
+    QuestionnaireSubmitRequest,
     ResumeResponse,
     SessionStatus,
     SessionStatusResponse,
@@ -53,6 +54,7 @@ def _last_ai_message(state: dict) -> str:
 def _map_status(step: str | None) -> SessionStatus:
     mapping = {
         "parsing": SessionStatus.PARSING,
+        "awaiting_questionnaire": SessionStatus.AWAITING_QUESTIONNAIRE,
         "generating": SessionStatus.GENERATING,
         "awaiting_test_data_or_generate": SessionStatus.AWAITING_EARLY_TEST_DATA,
         "awaiting_review": SessionStatus.AWAITING_REVIEW,
@@ -123,6 +125,7 @@ async def start_session(session_id: str, background_tasks: BackgroundTasks, g=De
         "execution_status": None,
         "execution_log": [],
         "allure_report_url": None,
+        "questionnaire_answers": {},
         "current_step": "parsing",
         "error_message": None,
     }
@@ -131,15 +134,11 @@ async def start_session(session_id: str, background_tasks: BackgroundTasks, g=De
     # The frontend polls /status to track progress as the graph advances.
     def _run_graph() -> None:
         try:
-            # Stream 1: ingest_and_index — graph pauses at generate_test_cases interrupt.
+            # Stream 1: ingest_and_index runs, then graph pauses before collect_questionnaire.
+            # collect_questionnaire node sets current_step="awaiting_questionnaire" and
+            # the frontend shows the questionnaire panel. The graph stays paused here until
+            # POST /chat/{thread_id}/questionnaire resumes it.
             list(g.stream(initial_state, config=config, stream_mode="values"))
-
-            # For unstructured files (PDF / DOCX / text) there is no schema to suggest
-            # so we skip the early-data window and immediately proceed to test case generation.
-            state_after_ingest = g.get_state(config)
-            if (state_after_ingest and
-                    state_after_ingest.values.get("current_step") == "generating"):
-                list(g.stream(None, config=config, stream_mode="values"))
         except Exception:
             logger.exception("Background graph execution failed for thread %s", thread_id)
 
@@ -281,6 +280,55 @@ async def submit_review(
         message=schema_msg,
         status=_map_status("awaiting_test_data"),
     )
+
+
+# ---------------------------------------------------------------------------
+# POST /chat/{thread_id}/questionnaire
+# ---------------------------------------------------------------------------
+
+@router.post("/chat/{thread_id}/questionnaire")
+async def submit_questionnaire(
+    thread_id: str,
+    body: QuestionnaireSubmitRequest,
+    background_tasks: BackgroundTasks,
+    g=Depends(get_graph),
+):
+    """
+    Receive intake questionnaire answers from the frontend.
+    Pushes the answers into graph state, resumes the collect_questionnaire node
+    (which will now format and inject the answers), and then proceeds to
+    generate_test_cases in a background task.
+    Frontend should poll /status for progress after calling this endpoint.
+    """
+    config = _config(thread_id)
+
+    # Inject questionnaire answers into graph state.
+    # The collect_questionnaire node will read these on next resume and
+    # format them into context_summary before proceeding to generate_test_cases.
+    g.update_state(config, {
+        "questionnaire_answers": body.answers,
+        "current_step": "generating",
+    })
+
+    def _run_generate() -> None:
+        try:
+            # Resume: collect_questionnaire sees answers → formats → sets current_step="generating"
+            # Graph then hits generate_test_cases interrupt and runs test case generation.
+            list(g.stream(None, config=config, stream_mode="values"))
+
+            # Unstructured files may emit a "generating" step that needs one more resume.
+            state_mid = g.get_state(config)
+            if state_mid and state_mid.values.get("current_step") == "generating":
+                list(g.stream(None, config=config, stream_mode="values"))
+        except Exception:
+            logger.exception("Background generate_test_cases (post-questionnaire) failed for thread %s", thread_id)
+
+    background_tasks.add_task(_run_generate)
+    return {
+        "thread_id": thread_id,
+        "status": "generating",
+        "message": "Questionnaire received. Generating test cases — poll /status for progress.",
+    }
 
 
 # ---------------------------------------------------------------------------

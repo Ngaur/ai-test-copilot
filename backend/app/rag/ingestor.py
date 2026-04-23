@@ -21,7 +21,7 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 from app.core.config import settings
 
-logger = logging.getLogger("ai_test_copilot.ingestor")
+logger = logging.getLogger("apitests_ai.ingestor")
 
 
 # ---------------------------------------------------------------------------

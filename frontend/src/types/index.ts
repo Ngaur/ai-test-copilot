@@ -1,6 +1,7 @@
 export type SessionStatus =
   | "idle"
   | "parsing"
+  | "awaiting_questionnaire"
   | "generating"
   | "awaiting_test_data_or_generate"
   | "awaiting_review"
@@ -32,6 +33,35 @@ export interface TestCase {
   expected_result: string;
   postconditions: string[];
   notes: string;
+}
+
+export interface QuestionnaireAnswers {
+  s1: {
+    product_name: string;
+    auth_type: string;
+    base_url: string;
+    user_roles: string[];
+  };
+  s2: {
+    p1_endpoints: string[];
+    error_codes: Record<string, string>;
+    idempotent_endpoints: string[];
+  };
+  s3: {
+    validation_rules: string;
+    pii_fields: string[];
+    data_constraints: string;
+  };
+  s4: {
+    user_journeys: Array<{ name: string; goal: string; steps: string }>;
+    state_machines: string;
+    failure_scenarios: string;
+  };
+  s5: {
+    test_types: string[];
+    negative_pct: string;
+    custom_tags: string[];
+  };
 }
 
 export interface ChatMessage {

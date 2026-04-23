@@ -24,3 +24,6 @@ export const getSessionPlaywrightTest = (
   client
     .get(`/sessions/${sessionId}/playwright-test`)
     .then((r) => r.data);
+
+export const deleteSession = (sessionId: string): Promise<{ ok: boolean; session_id: string }> =>
+  client.delete(`/sessions/${sessionId}`).then((r) => r.data);

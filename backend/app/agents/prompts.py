@@ -1,4 +1,4 @@
-SYSTEM_PROMPT = """You are AI Test Copilot, an expert QA engineer and test architect.
+SYSTEM_PROMPT = """You are APITests.ai, an expert QA engineer and test architect.
 Your role is to generate exhaustive, unambiguous, directly executable manual test cases
 from API specifications, Postman collections, and other documents.
 
@@ -422,6 +422,9 @@ GENERATE_TESTS_BATCH_PROMPT = (
 ## Business Context Summary (from Jira tickets / context documents)
 {context_summary}
 
+## Intake Questionnaire Answers (direct input from the tester — treat as authoritative)
+{questionnaire}
+
 ## Test Data (uploaded by the user — each row is one set of valid variable inputs)
 {test_data}
 
@@ -442,6 +445,21 @@ Generate comprehensive manual test cases for EACH endpoint listed above, coverin
 Use the API Metadata section above to build exact request payloads in test steps (field names, header
 keys, and URL structure). Keep all {{vars}} as variable placeholders — do not substitute literal values.
 If the Business Context Summary contains acceptance criteria, map at least one test case to each AC.
+
+If the "Intake Questionnaire Answers" section above is NOT "(none provided)":
+- **P1-Critical Endpoints**: Generate at least 2× as many test cases for each listed P1 endpoint compared
+  to non-P1 endpoints. Include extra security, auth, and boundary scenarios for P1 endpoints.
+- **Auth type**: Tailor auth test cases to the stated mechanism (e.g. if Bearer Token, test with expired JWT,
+  malformed JWT, no Authorization header — not generic "invalid key" patterns).
+- **User roles**: Generate one RBAC/authorization test case per role combination per endpoint (e.g. admin
+  can DELETE, viewer gets 403 on DELETE).
+- **Business rules**: Create dedicated negative test cases for every rule stated (e.g. if "email must be
+  lowercase", test with uppercase email → assert 400 + specific error message).
+- **PII fields**: For every PII field listed, assert its ABSENCE in every success response body.
+- **Error codes**: Use the exact HTTP status codes provided (e.g. if validation error = 422, all input
+  validation test cases must assert 422, not 400).
+- **Idempotent endpoints**: For listed idempotent endpoints, the duplicate-call test should assert 2xx
+  (not 409 conflict) and verify no duplicate resource was created.
 
 If the "Test Data" section above contains actual rows (it is NOT "(none)"):
 - Use the values from the FIRST test data row as concrete field values in happy-path test case steps
@@ -469,6 +487,9 @@ The goal is to simulate realistic user journeys AND to find scenarios that can b
 ## Business Context Summary (from Jira tickets / context documents)
 {context_summary}
 
+## Intake Questionnaire Answers (direct input from the tester — treat as authoritative)
+{questionnaire}
+
 ## Test Data (uploaded by the user — each row is one set of valid variable inputs)
 {test_data}
 
@@ -480,6 +501,17 @@ Generate exactly {n_workflows} workflow test cases. Each test case MUST:
   with real field names, expected status code, AND full response body assertions
 - If the "Test Data" section above contains actual rows (it is NOT "(none)"), use values from the
   FIRST test data row for request body fields — do NOT use placeholder strings like "fn", "ln", "1234"
+
+If the "Intake Questionnaire Answers" section above is NOT "(none provided)":
+- **User Journeys**: If user journeys are defined, generate at least one workflow test case per listed
+  journey, following the exact endpoint sequence described. These take priority over the generic
+  scenario types below.
+- **State Machines**: If resource states and invalid transitions are defined, generate workflow tests
+  that attempt each invalid transition and assert the API rejects it correctly.
+- **Failure Scenarios**: If multi-step failure scenarios are described, model each one as a negative
+  workflow test case.
+- **User Roles in workflows**: If roles are defined, include at least one privilege escalation workflow
+  (User A creates → User B attempts to modify/delete → expects 403).
 
 Cover ALL of the following scenario types across your {n_workflows} test cases:
 

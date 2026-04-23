@@ -1,5 +1,5 @@
 import client from "./client";
-import type { SessionStatus, TestCase } from "@/types";
+import type { QuestionnaireAnswers, SessionStatus, TestCase } from "@/types";
 
 export interface StartSessionResponse {
   thread_id: string;
@@ -145,4 +145,15 @@ export const skipPlaywright = async (threadId: string) => {
 export const generateReport = async () => {
   const res = await client.get("/report/generate");
   return res.data as { report_url: string };
+};
+
+export const submitQuestionnaire = async (
+  threadId: string,
+  answers: QuestionnaireAnswers,
+): Promise<{ thread_id: string; status: string; message: string }> => {
+  const res = await client.post(`/chat/${threadId}/questionnaire`, {
+    thread_id: threadId,
+    answers,
+  });
+  return res.data;
 };

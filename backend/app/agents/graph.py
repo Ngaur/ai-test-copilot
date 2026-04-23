@@ -1,8 +1,12 @@
 """
-LangGraph state machine for AI Test Copilot.
+LangGraph state machine for APITests.ai.
 
                     ┌─────────────────────┐
                     │   ingest_and_index  │
+                    └────────┬────────────┘
+                             │
+                    ┌────────▼────────────┐
+                    │collect_questionnaire│  ← INTERRUPT: awaiting_questionnaire
                     └────────┬────────────┘
                              │
                     ┌────────▼────────────┐
@@ -36,6 +40,7 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, StateGraph
 
 from app.agents.nodes import (
+    collect_questionnaire,
     execute_tests,
     generate_automated_tests,
     generate_test_cases,
@@ -54,6 +59,7 @@ def build_graph() -> StateGraph:
 
     # Nodes
     builder.add_node("ingest_and_index", ingest_and_index)
+    builder.add_node("collect_questionnaire", collect_questionnaire)
     builder.add_node("generate_test_cases", generate_test_cases)
     builder.add_node("human_review", human_review)
     builder.add_node("improve_test_cases", improve_test_cases)
@@ -63,7 +69,8 @@ def build_graph() -> StateGraph:
 
     # Edges
     builder.set_entry_point("ingest_and_index")
-    builder.add_edge("ingest_and_index", "generate_test_cases")
+    builder.add_edge("ingest_and_index", "collect_questionnaire")
+    builder.add_edge("collect_questionnaire", "generate_test_cases")
     builder.add_edge("generate_test_cases", "human_review")
 
     # After human_review interrupt resumes — branch on approval
@@ -98,7 +105,7 @@ def build_graph() -> StateGraph:
         # generate_automated_tests is intercepted by the background task for
         # per-TC progressive generation with progress updates via g.update_state().
         # The graph node itself becomes a no-op that simply checks the file exists.
-        interrupt_before=["generate_test_cases", "human_review", "request_test_data", "generate_automated_tests"],
+        interrupt_before=["collect_questionnaire", "generate_test_cases", "human_review", "request_test_data", "generate_automated_tests"],
     )
 
 

@@ -21,7 +21,7 @@ import sqlite3
 import threading
 from datetime import datetime, timezone
 
-logger = logging.getLogger("ai_test_copilot.session_registry")
+logger = logging.getLogger("apitests_ai.session_registry")
 
 
 def _now_iso() -> str:
@@ -189,6 +189,19 @@ class SessionRegistry:
                     ).fetchone()
                 return row is not None
             except Exception:
+                return False
+
+    def delete_session(self, session_id: str) -> bool:
+        """Delete a session and all its test cases from the registry. Returns True if deleted."""
+        with self._lock:
+            try:
+                with self._connect() as conn:
+                    conn.execute("DELETE FROM test_cases WHERE session_id = ?", (session_id,))
+                    result = conn.execute("DELETE FROM sessions WHERE session_id = ?", (session_id,))
+                    conn.commit()
+                    return result.rowcount > 0
+            except Exception:
+                logger.exception("delete_session failed for %s", session_id)
                 return False
 
 

@@ -1,7 +1,8 @@
+import { useQueryClient } from "@tanstack/react-query";
 import { useQuery } from "@tanstack/react-query";
-import { Code2, FileCode2, FlaskConical, Plus, Settings, Trash2 } from "lucide-react";
+import { Code2, FileCode2, FlaskConical, Plus, Settings, Trash2, X } from "lucide-react";
 import { useState } from "react";
-import { listSessions } from "@/api/sessions";
+import { deleteSession, listSessions } from "@/api/sessions";
 import SettingsModal from "@/components/Settings/SettingsModal";
 import { useSessionStore } from "@/store/session";
 import type { PastSession } from "@/types";
@@ -11,23 +12,6 @@ interface Props {
   onSelectPastSession: (session: PastSession) => void;
 }
 
-// ---------------------------------------------------------------------------
-// Relative date helper
-// ---------------------------------------------------------------------------
-
-function relativeDate(iso: string): string {
-  try {
-    const diffMs = Date.now() - new Date(iso).getTime();
-    const diffDays = Math.floor(diffMs / 86_400_000);
-    if (diffDays === 0) return "Today";
-    if (diffDays === 1) return "Yesterday";
-    if (diffDays < 7) return `${diffDays}d ago`;
-    if (diffDays < 30) return `${Math.floor(diffDays / 7)}w ago`;
-    return `${Math.floor(diffDays / 30)}mo ago`;
-  } catch {
-    return "";
-  }
-}
 
 // ---------------------------------------------------------------------------
 // Single past-session row
@@ -37,11 +21,55 @@ function PastSessionRow({
   past,
   isViewing,
   onClick,
+  onDeleted,
 }: {
   past: PastSession;
   isViewing: boolean;
   onClick: () => void;
+  onDeleted: () => void;
 }) {
+  const [confirming, setConfirming] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+
+  const handleDelete = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (!confirming) { setConfirming(true); return; }
+    setDeleting(true);
+    try {
+      await deleteSession(past.session_id);
+      onDeleted();
+    } finally {
+      setDeleting(false);
+      setConfirming(false);
+    }
+  };
+
+  const handleCancelDelete = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    setConfirming(false);
+  };
+
+  if (confirming) {
+    return (
+      <div className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-danger/5 border border-danger/20">
+        <span className="flex-1 text-xs text-danger truncate">Delete "{past.filename}"?</span>
+        <button
+          onClick={handleDelete}
+          disabled={deleting}
+          className="text-[10px] font-medium text-danger hover:text-danger/80 px-1.5 py-0.5 rounded border border-danger/30 hover:bg-danger/10 transition-colors disabled:opacity-50 flex-shrink-0"
+        >
+          {deleting ? "…" : "Yes"}
+        </button>
+        <button
+          onClick={handleCancelDelete}
+          className="text-text-muted hover:text-text-secondary transition-colors flex-shrink-0"
+        >
+          <X size={13} />
+        </button>
+      </div>
+    );
+  }
+
   return (
     <button
       onClick={onClick}
@@ -56,24 +84,26 @@ function PastSessionRow({
         {past.filename}
       </span>
 
-      {/* Artifact badges */}
-      <span className="flex items-center gap-1 flex-shrink-0">
+      {/* Artifact badges — hidden on hover to make room for delete icon */}
+      <span className="flex items-center gap-1 flex-shrink-0 group-hover:hidden">
         <Code2
           size={11}
-          className={past.has_feature_files ? "text-green-400" : "text-text-muted opacity-30"}
-          title={past.has_feature_files ? "Feature files available" : "No feature files"}
+          className={past.has_feature_files ? "text-accent" : "text-text-muted opacity-30"}
         />
         <FileCode2
           size={11}
-          className={past.has_playwright ? "text-purple-400" : "text-text-muted opacity-30"}
-          title={past.has_playwright ? "Playwright tests available" : "No Playwright tests"}
+          className={past.has_playwright ? "text-text-secondary" : "text-text-muted opacity-30"}
         />
       </span>
 
-      {/* Relative date */}
-      <span className="text-[10px] text-text-muted flex-shrink-0 hidden group-hover:block">
-        {relativeDate(past.updated_at)}
-      </span>
+      {/* Delete button — shown on hover */}
+      <button
+        onClick={handleDelete}
+        className="hidden group-hover:flex items-center justify-center w-5 h-5 rounded text-text-muted hover:text-danger hover:bg-danger/10 transition-colors flex-shrink-0"
+        title="Delete session"
+      >
+        <Trash2 size={12} />
+      </button>
     </button>
   );
 }
@@ -83,8 +113,9 @@ function PastSessionRow({
 // ---------------------------------------------------------------------------
 
 export default function Sidebar({ onNewSession, onSelectPastSession }: Props) {
-  const { session, viewingSession } = useSessionStore();
+  const { session, viewingSession, setViewingSession } = useSessionStore();
   const [showSettings, setShowSettings] = useState(false);
+  const queryClient = useQueryClient();
 
   const { data: pastSessions = [] } = useQuery({
     queryKey: ["past-sessions"],
@@ -92,6 +123,12 @@ export default function Sidebar({ onNewSession, onSelectPastSession }: Props) {
     staleTime: 30_000,
     refetchOnWindowFocus: false,
   });
+
+  const handleDeleted = (sessionId: string) => {
+    // If we're currently viewing the deleted session, close it
+    if (viewingSession?.session_id === sessionId) setViewingSession(null);
+    queryClient.invalidateQueries({ queryKey: ["past-sessions"] });
+  };
 
   // Exclude the currently active session from the history list to avoid duplication
   const historyItems = pastSessions.filter(
@@ -107,7 +144,7 @@ export default function Sidebar({ onNewSession, onSelectPastSession }: Props) {
             <FlaskConical size={16} className="text-white" />
           </div>
           <span className="font-semibold text-text-primary text-sm tracking-tight">
-            AI Test Copilot
+            APITests.ai
           </span>
         </div>
       </div>
@@ -153,6 +190,7 @@ export default function Sidebar({ onNewSession, onSelectPastSession }: Props) {
                 past={past}
                 isViewing={viewingSession?.session_id === past.session_id}
                 onClick={() => onSelectPastSession(past)}
+                onDeleted={() => handleDeleted(past.session_id)}
               />
             ))}
           </div>

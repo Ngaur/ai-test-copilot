@@ -17,6 +17,7 @@ class SessionStatus(str, Enum):
     AWAITING_REVIEW = "awaiting_review"
     IMPROVING = "improving"
     GENERATING_SCHEMA = "generating_schema"
+    AWAITING_QUESTIONNAIRE = "awaiting_questionnaire"
     AWAITING_EARLY_TEST_DATA = "awaiting_test_data_or_generate"
     AWAITING_TEST_DATA = "awaiting_test_data"
     GENERATING_AUTOMATION = "generating_automation"
@@ -59,6 +60,11 @@ class HumanReviewRequest(BaseModel):
     thread_id: str
     approved: bool
     feedback: str | None = None
+
+
+class QuestionnaireSubmitRequest(BaseModel):
+    thread_id: str
+    answers: dict[str, Any] = Field(default_factory=dict)
 
 
 class ResumeResponse(BaseModel):
