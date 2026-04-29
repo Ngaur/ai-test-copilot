@@ -125,3 +125,56 @@ class TestDataSchemaOutput(BaseModel):
     columns: list[TestDataColumn] = Field(
         description="List of test data columns needed for automation, one per input variable"
     )
+
+
+# ---------------------------------------------------------------------------
+# AI-generated test data models
+# ---------------------------------------------------------------------------
+
+class TestDataField(BaseModel):
+    """A single field inside a generated test data row."""
+    key: str = Field(description="Field name (matches the API parameter / body field name)")
+    value: str = Field(description="Realistic string value for this field")
+
+
+class TestDataRow(BaseModel):
+    """A single row of AI-generated test data as an explicit list of key-value pairs."""
+    fields: list[TestDataField] = Field(
+        description="All field-value pairs for this test scenario, in the same order as column_names"
+    )
+
+
+class GeneratedTestDataOutput(BaseModel):
+    """LLM structured output for test data generation from the API spec."""
+    column_names: list[str] = Field(
+        description="Ordered list of all field/column names present in every row"
+    )
+    rows: list[TestDataRow] = Field(
+        description="List of test data rows; each row is a complete, independent test scenario"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Dynamic questionnaire models
+# ---------------------------------------------------------------------------
+
+class QuestionnaireQuestion(BaseModel):
+    id: str = Field(description="Unique question identifier, e.g. 'q1'")
+    question: str = Field(description="The question text shown to the user")
+    type: str = Field(description="Input type: text | textarea | select | multi_select")
+    options: list[str] = Field(
+        default_factory=list,
+        description="Answer options for select / multi_select types; empty for text/textarea",
+    )
+    hint: str = Field(default="", description="One-line hint explaining why this question improves test quality")
+    category: str = Field(
+        default="",
+        description="Semantic category: error_codes | auth | business_rules | workflow | pii | test_preferences",
+    )
+
+
+class QuestionnaireQuestionsOutput(BaseModel):
+    """Structured output for the dynamic questionnaire generation node."""
+    questions: list[QuestionnaireQuestion] = Field(
+        description="Targeted clarifying questions (5-8 max) based on gaps identified in the API spec"
+    )

@@ -1,20 +1,28 @@
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
+  Activity,
   ArrowLeft,
+  BarChart2,
   ChevronDown,
   ChevronRight,
   ClipboardList,
   Code2,
+  Download,
   FileCode2,
+  RefreshCw,
 } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
+  getSessionExecutionStatus,
   getSessionFeatureFiles,
+  getSessionLoadTests,
   getSessionPlaywrightTest,
+  getSessionReportSummary,
   getSessionTestCases,
+  reExecuteSession,
 } from "@/api/sessions";
 import { useSessionStore } from "@/store/session";
-import type { PastSession, TestCase } from "@/types";
+import type { LoadTest, PastSession, TestCase } from "@/types";
 
 // ---------------------------------------------------------------------------
 // Shared badge helpers (mirrors TestCaseTable styles)
@@ -53,7 +61,7 @@ function Badge({
 }
 
 // ---------------------------------------------------------------------------
-// Read-only test case row (same visual as TestCaseTable.TestCaseRow)
+// Read-only test case row
 // ---------------------------------------------------------------------------
 
 function TestCaseRow({ tc }: { tc: TestCase }) {
@@ -166,7 +174,7 @@ function Spinner() {
 }
 
 // ---------------------------------------------------------------------------
-// Code viewer panel (feature files & playwright)
+// Code viewer panel
 // ---------------------------------------------------------------------------
 
 function CodePanel({
@@ -198,6 +206,103 @@ function CodePanel({
 }
 
 // ---------------------------------------------------------------------------
+// Results tab — summary stats + embedded Allure report iframe
+// ---------------------------------------------------------------------------
+
+function ResultsTab({ session, reportKey }: { session: PastSession; reportKey: number }) {
+  const [iframeLoaded, setIframeLoaded] = useState(false);
+
+  useEffect(() => {
+    setIframeLoaded(false);
+  }, [reportKey]);
+
+  const { data: summary, isError: summaryError } = useQuery({
+    queryKey: ["session-report-summary", session.session_id, reportKey],
+    queryFn: () => getSessionReportSummary(session.session_id),
+    retry: false,
+  });
+
+  const stat = summary?.statistic;
+  const passed = stat?.passed ?? 0;
+  const failed = (stat?.failed ?? 0) + (stat?.broken ?? 0);
+  const skipped = stat?.skipped ?? 0;
+  const total = stat?.total ?? 0;
+  const passRate = total > 0 ? Math.round((passed / total) * 100) : 0;
+  const failRate = total > 0 ? Math.round((failed / total) * 100) : 0;
+
+  return (
+    <div className="flex flex-col h-full">
+      {/* Summary bar */}
+      {!summaryError && stat && (
+        <div className="flex-shrink-0 px-5 py-3 border-b border-border bg-card space-y-2">
+          <div className="flex items-center gap-5">
+            <span className="flex items-center gap-1.5 text-sm font-semibold text-success">
+              <span className="w-2 h-2 rounded-full bg-success" />
+              {passed} Passed
+            </span>
+            <span className="flex items-center gap-1.5 text-sm font-semibold text-danger">
+              <span className="w-2 h-2 rounded-full bg-danger" />
+              {failed} Failed
+            </span>
+            <span className="flex items-center gap-1.5 text-sm text-text-muted">
+              <span className="w-2 h-2 rounded-full bg-text-muted" />
+              {skipped} Skipped
+            </span>
+            <span className="ml-auto text-xs text-text-muted">
+              {total} total · {passRate}% pass rate
+              {session.execution_status && (
+                <span className={`ml-2 px-1.5 py-0.5 rounded text-[10px] font-medium ${
+                  session.execution_status === "passed" ? "bg-success/15 text-success" : "bg-danger/15 text-danger"
+                }`}>
+                  {session.execution_status}
+                </span>
+              )}
+            </span>
+          </div>
+          <div className="h-1.5 rounded-full bg-surface overflow-hidden flex">
+            <div className="h-full bg-success transition-all" style={{ width: `${passRate}%` }} />
+            <div className="h-full bg-danger transition-all" style={{ width: `${failRate}%` }} />
+          </div>
+        </div>
+      )}
+
+      {summaryError && (
+        <div className="flex-shrink-0 px-5 py-2 border-b border-border bg-card">
+          <p className="text-xs text-text-muted">
+            Report summary unavailable — install Allure CLI to enable:{" "}
+            <code className="font-mono">npm install -g allure-commandline</code>
+          </p>
+        </div>
+      )}
+
+      {/* Allure report iframe */}
+      <div className="flex-1 relative overflow-hidden">
+        {!iframeLoaded && (
+          <div className="absolute inset-0 flex items-center justify-center bg-surface z-10">
+            <div className="flex gap-1.5">
+              {[0, 150, 300].map((d) => (
+                <span
+                  key={d}
+                  className="w-2 h-2 bg-text-muted rounded-full animate-bounce"
+                  style={{ animationDelay: `${d}ms` }}
+                />
+              ))}
+            </div>
+          </div>
+        )}
+        <iframe
+          key={reportKey}
+          src={`/api/v1/report/view/${session.session_id}/index.html`}
+          title="Test Report"
+          className="w-full h-full border-0"
+          onLoad={() => setIframeLoaded(true)}
+        />
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Date formatting helper
 // ---------------------------------------------------------------------------
 
@@ -220,7 +325,90 @@ function formatDate(iso: string): string {
 // Main SessionViewer
 // ---------------------------------------------------------------------------
 
-type Tab = "manual" | "features" | "playwright";
+type Tab = "manual" | "features" | "playwright" | "performance" | "results";
+
+function downloadLoadScript(lt: LoadTest) {
+  const blob = new Blob([lt.content], { type: "application/javascript" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `${lt.name.replace(/\s+/g, "_").toLowerCase()}.js`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+function PerformanceViewTab({ loadTests }: { loadTests: LoadTest[] }) {
+  const [selected, setSelected] = useState<LoadTest | null>(loadTests[0] ?? null);
+
+  if (loadTests.length === 0) {
+    return (
+      <div className="flex flex-col items-center justify-center h-full gap-2 text-text-muted">
+        <Activity size={32} className="opacity-30" />
+        <p className="text-sm">No load scripts were generated in this session.</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex h-full overflow-hidden">
+      {/* Left — load test list */}
+      <div className="w-56 flex-shrink-0 border-r border-border flex flex-col">
+        <div className="px-3 py-2 border-b border-border flex-shrink-0">
+          <span className="text-[11px] font-semibold text-text-muted uppercase tracking-wider">Load Scripts</span>
+        </div>
+        <div className="flex-1 overflow-y-auto scrollbar-thin p-2 space-y-1.5">
+          {loadTests.map((lt) => (
+            <button
+              key={lt.id}
+              onClick={() => setSelected(lt)}
+              className={[
+                "w-full text-left px-2.5 py-2 rounded-lg border transition-all",
+                selected?.id === lt.id
+                  ? "border-accent/50 bg-accent/5"
+                  : "border-border hover:border-accent/30 hover:bg-card",
+              ].join(" ")}
+            >
+              <div className="flex items-center justify-between gap-1">
+                <div className="flex items-center gap-1.5 min-w-0">
+                  <span className="w-1.5 h-1.5 rounded-full bg-success flex-shrink-0" />
+                  <span className="text-xs font-medium text-text-primary truncate">{lt.name}</span>
+                </div>
+                <button
+                  onClick={(e) => { e.stopPropagation(); downloadLoadScript(lt); }}
+                  className="text-text-muted hover:text-accent transition-colors flex-shrink-0"
+                  title="Download"
+                >
+                  <Download size={11} />
+                </button>
+              </div>
+              <p className="text-[10px] text-text-muted mt-0.5 pl-3">{lt.vus} VUs · {lt.duration}</p>
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Right — script preview */}
+      <div className="flex-1 overflow-hidden flex flex-col min-w-0">
+        {selected ? (
+          <>
+            <div className="flex items-center gap-3 px-4 py-2 border-b border-border flex-shrink-0">
+              <span className="text-xs font-mono text-text-muted truncate flex-1">{selected.name}.js</span>
+              <button
+                onClick={() => downloadLoadScript(selected)}
+                className="flex items-center gap-1.5 text-xs text-text-muted hover:text-accent transition-colors"
+              >
+                <Download size={12} /> Download
+              </button>
+            </div>
+            <pre className="flex-1 overflow-auto scrollbar-thin text-[11px] font-mono leading-relaxed text-text-primary bg-surface p-4 m-0 whitespace-pre">
+              {selected.content}
+            </pre>
+          </>
+        ) : null}
+      </div>
+    </div>
+  );
+}
 
 interface Props {
   session: PastSession;
@@ -229,6 +417,44 @@ interface Props {
 export default function SessionViewer({ session }: Props) {
   const { setViewingSession } = useSessionStore();
   const [tab, setTab] = useState<Tab>("manual");
+  const [reportKey, setReportKey] = useState(0);
+  const [isRerunning, setIsRerunning] = useState(false);
+  const [rerunError, setRerunError] = useState<string | null>(null);
+  const prevExecStatus = useRef<string | null>(null);
+  const queryClient = useQueryClient();
+
+  // Poll execution status while re-running
+  const { data: execStatus } = useQuery({
+    queryKey: ["session-exec-status", session.session_id],
+    queryFn: () => getSessionExecutionStatus(session.session_id),
+    enabled: isRerunning,
+    refetchInterval: isRerunning ? 2000 : false,
+  });
+
+  // Detect running → done transition
+  useEffect(() => {
+    if (!isRerunning) return;
+    const status = execStatus?.execution_status;
+    if (status && status !== "running") {
+      setIsRerunning(false);
+      setReportKey((k) => k + 1);
+      queryClient.invalidateQueries({ queryKey: ["sessions"] });
+      queryClient.invalidateQueries({ queryKey: ["session-exec-status", session.session_id] });
+      prevExecStatus.current = status;
+    }
+  }, [execStatus, isRerunning, queryClient, session.session_id]);
+
+  const handleRerun = async () => {
+    if (isRerunning) return;
+    setRerunError(null);
+    try {
+      await reExecuteSession(session.session_id);
+      setIsRerunning(true);
+      setTab("results");
+    } catch {
+      setRerunError("Failed to start re-execution. Please try again.");
+    }
+  };
 
   const testCasesQuery = useQuery({
     queryKey: ["past-test-cases", session.session_id],
@@ -251,7 +477,15 @@ export default function SessionViewer({ session }: Props) {
     retry: false,
   });
 
+  const loadTestsQuery = useQuery({
+    queryKey: ["past-load-tests", session.session_id],
+    queryFn: () => getSessionLoadTests(session.session_id),
+    enabled: tab === "performance" && session.has_load_tests,
+    retry: false,
+  });
+
   const testCases = testCasesQuery.data?.test_cases ?? [];
+  const loadTests = loadTestsQuery.data?.load_tests ?? [];
 
   return (
     <div className="flex-1 overflow-hidden flex flex-col animate-fade-in">
@@ -274,7 +508,7 @@ export default function SessionViewer({ session }: Props) {
       </div>
 
       {/* ── Tab bar ── */}
-      <div className="flex border-b border-border flex-shrink-0">
+      <div className="flex items-center border-b border-border flex-shrink-0">
         {/* Manual Test Cases */}
         <button
           onClick={() => setTab("manual")}
@@ -322,7 +556,65 @@ export default function SessionViewer({ session }: Props) {
           <FileCode2 size={13} />
           Playwright Tests
         </button>
+
+        {/* Performance / Load Scripts */}
+        <button
+          onClick={() => session.has_load_tests && setTab("performance")}
+          disabled={!session.has_load_tests}
+          title={!session.has_load_tests ? "No load scripts generated in this session" : undefined}
+          className={`px-4 py-2.5 text-xs font-medium transition-colors flex items-center gap-1.5 disabled:opacity-40 disabled:cursor-not-allowed ${
+            tab === "performance"
+              ? "text-text-primary border-b-2 border-text-primary -mb-px"
+              : "text-text-muted hover:text-text-secondary"
+          }`}
+        >
+          <Activity size={13} />
+          Performance
+        </button>
+
+        {/* Results (only if tests were executed) */}
+        <button
+          onClick={() => (session.has_execution || isRerunning) && setTab("results")}
+          disabled={!session.has_execution && !isRerunning}
+          title={!session.has_execution && !isRerunning ? "Tests not run in this session" : undefined}
+          className={`px-4 py-2.5 text-xs font-medium transition-colors flex items-center gap-1.5 disabled:opacity-40 disabled:cursor-not-allowed ${
+            tab === "results"
+              ? "text-text-primary border-b-2 border-text-primary -mb-px"
+              : "text-text-muted hover:text-text-secondary"
+          }`}
+        >
+          <BarChart2 size={13} />
+          Results
+          {isRerunning ? (
+            <span className="text-[10px] px-1.5 py-0.5 rounded-full font-medium bg-warning/20 text-warning">
+              running…
+            </span>
+          ) : session.has_execution && session.execution_status ? (
+            <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-medium ${
+              session.execution_status === "passed" ? "bg-success/20 text-success" : "bg-danger/20 text-danger"
+            }`}>
+              {session.execution_status}
+            </span>
+          ) : null}
+        </button>
+
+        {/* Re-run button — visible when Playwright tests exist */}
+        {session.has_playwright && (
+          <div className="ml-auto px-3 py-2 flex-shrink-0">
+            <button
+              onClick={handleRerun}
+              disabled={isRerunning}
+              className="flex items-center gap-1.5 bg-card border border-border text-text-muted text-xs font-medium px-3 py-1.5 rounded-lg hover:text-text-secondary hover:border-accent/30 disabled:opacity-50 transition-colors"
+            >
+              <RefreshCw size={13} className={isRerunning ? "animate-spin" : ""} />
+              {isRerunning ? "Running…" : "Re-run Tests"}
+            </button>
+          </div>
+        )}
       </div>
+      {rerunError && (
+        <p className="text-xs text-danger px-4 py-1 border-b border-border">{rerunError}</p>
+      )}
 
       {/* ── Tab content ── */}
       <div className="flex-1 overflow-hidden flex flex-col">
@@ -399,6 +691,36 @@ export default function SessionViewer({ session }: Props) {
             color="text-text-primary"
             placeholder="Playwright tests not available for this session."
           />
+        )}
+
+        {tab === "performance" && session.has_load_tests && (
+          loadTestsQuery.isLoading ? (
+            <Spinner />
+          ) : (
+            <PerformanceViewTab loadTests={loadTests} />
+          )
+        )}
+
+        {tab === "results" && (session.has_execution || isRerunning) && (
+          isRerunning ? (
+            <div className="flex flex-1 items-center justify-center h-full">
+              <div className="text-center space-y-3">
+                <div className="flex gap-1.5 justify-center">
+                  {[0, 150, 300].map((d) => (
+                    <span
+                      key={d}
+                      className="w-2.5 h-2.5 bg-accent rounded-full animate-bounce"
+                      style={{ animationDelay: `${d}ms` }}
+                    />
+                  ))}
+                </div>
+                <p className="text-sm font-semibold text-text-primary">Running tests…</p>
+                <p className="text-xs text-text-muted">This may take a few minutes.</p>
+              </div>
+            </div>
+          ) : (
+            <ResultsTab session={session} reportKey={reportKey} />
+          )
         )}
       </div>
     </div>

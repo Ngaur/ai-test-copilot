@@ -70,6 +70,15 @@ class SessionRegistry:
         with self._lock:
             with self._connect() as conn:
                 conn.executescript(self._DDL)
+                for col_sql in [
+                    "ALTER TABLE sessions ADD COLUMN has_execution INTEGER NOT NULL DEFAULT 0",
+                    "ALTER TABLE sessions ADD COLUMN execution_status TEXT",
+                    "ALTER TABLE sessions ADD COLUMN has_load_tests INTEGER NOT NULL DEFAULT 0",
+                ]:
+                    try:
+                        conn.execute(col_sql)
+                    except Exception:
+                        pass  # column already exists
 
     # ------------------------------------------------------------------
     # Write methods
@@ -142,6 +151,65 @@ class SessionRegistry:
             except Exception:
                 logger.exception("mark_has_playwright failed for %s", session_id)
 
+    def mark_has_execution(self, session_id: str, status: str) -> None:
+        """Set has_execution=1 and record execution_status after test run completes."""
+        if not session_id:
+            return
+        now = _now_iso()
+        with self._lock:
+            try:
+                with self._connect() as conn:
+                    conn.execute(
+                        "UPDATE sessions SET has_execution = 1, execution_status = ?, updated_at = ? WHERE session_id = ?",
+                        (status, now, session_id),
+                    )
+            except Exception:
+                logger.exception("mark_has_execution failed for %s", session_id)
+
+    def mark_has_load_tests(self, session_id: str) -> None:
+        """Set has_load_tests=1 after first load test script is generated."""
+        if not session_id:
+            return
+        now = _now_iso()
+        with self._lock:
+            try:
+                with self._connect() as conn:
+                    conn.execute(
+                        "UPDATE sessions SET has_load_tests = 1, updated_at = ? WHERE session_id = ?",
+                        (now, session_id),
+                    )
+            except Exception:
+                logger.exception("mark_has_load_tests failed for %s", session_id)
+
+    def set_execution_status(self, session_id: str, status: str) -> None:
+        """Update execution_status only (does not touch has_execution). Used to mark 'running'."""
+        if not session_id:
+            return
+        now = _now_iso()
+        with self._lock:
+            try:
+                with self._connect() as conn:
+                    conn.execute(
+                        "UPDATE sessions SET execution_status = ?, updated_at = ? WHERE session_id = ?",
+                        (status, now, session_id),
+                    )
+            except Exception:
+                logger.exception("set_execution_status failed for %s", session_id)
+
+    def get_execution_status(self, session_id: str) -> dict | None:
+        """Return has_execution and execution_status for a single session."""
+        with self._lock:
+            try:
+                with self._connect() as conn:
+                    row = conn.execute(
+                        "SELECT has_execution, execution_status FROM sessions WHERE session_id = ?",
+                        (session_id,),
+                    ).fetchone()
+                return dict(row) if row else None
+            except Exception:
+                logger.exception("get_execution_status failed for %s", session_id)
+                return None
+
     # ------------------------------------------------------------------
     # Read methods
     # ------------------------------------------------------------------
@@ -154,7 +222,8 @@ class SessionRegistry:
                     rows = conn.execute(
                         """
                         SELECT session_id, filename, created_at, updated_at,
-                               has_feature_files, has_playwright
+                               has_feature_files, has_playwright,
+                               has_execution, execution_status, has_load_tests
                         FROM sessions
                         ORDER BY updated_at DESC
                         LIMIT 50

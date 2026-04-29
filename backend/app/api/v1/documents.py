@@ -178,6 +178,13 @@ async def upload_early_test_data(
             list(g.stream(None, config=config, stream_mode="values"))
         except Exception:
             logger.exception("Background early test generation failed for thread %s", thread_id)
+            try:
+                g.update_state(config, {
+                    "current_step": "error",
+                    "error_message": "Test case generation failed. Please start a new session.",
+                })
+            except Exception:
+                pass
 
     background_tasks.add_task(_run_generation)
 

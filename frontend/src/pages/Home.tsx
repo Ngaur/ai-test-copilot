@@ -1,6 +1,8 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { confirmPlaywright, getStatus, skipPlaywright } from "@/api/chat";
+import EarlyTestDataScreen from "@/components/EarlyTestData/EarlyTestDataScreen";
+import LoadTestConfigScreen from "@/components/LoadTest/LoadTestConfigScreen";
 import ProcessingScreen from "@/components/ProcessingScreen/ProcessingScreen";
 import QuestionnairePanel from "@/components/Questionnaire/QuestionnairePanel";
 import ResultsPanel from "@/components/Results/ResultsPanel";
@@ -31,6 +33,7 @@ const TERMINAL_STEPS = new Set<SessionStatus>([
   "awaiting_review",
   "awaiting_test_data",
   "awaiting_playwright_confirmation",
+  "awaiting_load_test_config",
   "ready_to_execute",
   "done",
   "error",
@@ -118,6 +121,7 @@ export default function Home() {
     addMessage,
     setLoading,
     setGenerationProgress,
+    setQuestionnaireQuestions,
     reset,
     viewingSession,
     setViewingSession,
@@ -127,12 +131,9 @@ export default function Home() {
   const [showTestDataUpload, setShowTestDataUpload] = useState(false);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  // Auto-open test data modal when status reaches the relevant pauses
+  // Auto-open test data modal when status reaches the upload pause (after review approval)
   useEffect(() => {
-    if (
-      session?.status === "awaiting_test_data" ||
-      session?.status === "awaiting_test_data_or_generate"
-    ) {
+    if (session?.status === "awaiting_test_data") {
       setShowTestDataUpload(true);
     }
   }, [session?.status]);
@@ -154,7 +155,10 @@ export default function Home() {
       pollRef.current = setInterval(async () => {
         try {
           const s = await getStatus(threadId, sessionId);
-          updateStatus(s.status);
+
+          if (s.questionnaire_questions && s.questionnaire_questions.length > 0) {
+            setQuestionnaireQuestions(s.questionnaire_questions);
+          }
 
           const stepChanged = s.current_step && s.current_step !== lastStep;
           const msgChanged = s.last_message && s.last_message !== lastMsg;
@@ -166,6 +170,7 @@ export default function Home() {
           }
 
           if (stepChanged) {
+            updateStatus(s.status);
             const prev = lastStep;
             lastStep = s.current_step;
             lastMsg = s.last_message ?? "";
@@ -198,7 +203,7 @@ export default function Home() {
         }
       }, 2500);
     },
-    [updateStatus, addMessage, setGenerationProgress, queryClient, stopPolling],
+    [updateStatus, addMessage, setGenerationProgress, setQuestionnaireQuestions, queryClient, stopPolling],
   );
 
   // Restart polling when status transitions happen triggered by child components
@@ -257,10 +262,28 @@ export default function Home() {
 
   const handleQuestionnaireSubmitted = useCallback(() => {
     if (!session?.threadId || !session?.sessionId) return;
-    updateStatus("generating");
+    // Backend now returns awaiting_test_data_or_generate; poll once to pick up the status
     setLoading(true);
     startPolling(session.threadId, session.sessionId, "awaiting_questionnaire");
+  }, [session?.threadId, session?.sessionId, setLoading, startPolling]);
+
+  const handleEarlyDataSkipped = useCallback(() => {
+    if (!session?.threadId || !session?.sessionId) return;
+    updateStatus("generating");
+    setLoading(true);
+    startPolling(session.threadId, session.sessionId, "awaiting_test_data_or_generate");
   }, [session?.threadId, session?.sessionId, updateStatus, setLoading, startPolling]);
+
+  const handleEarlyDataUploaded = useCallback(
+    (_rowsLoaded: number, message: string) => {
+      if (!session?.threadId || !session?.sessionId) return;
+      addMessage({ role: "assistant", content: message });
+      updateStatus("generating");
+      setLoading(true);
+      startPolling(session.threadId, session.sessionId, "awaiting_test_data_or_generate");
+    },
+    [session?.threadId, session?.sessionId, addMessage, updateStatus, setLoading, startPolling],
+  );
 
   const handleReviewStatusChange = useCallback(
     (status: string) => {
@@ -290,7 +313,6 @@ export default function Home() {
     status === "improving" ||
     status === "generating_schema" ||
     status === "generating_automation" ||
-    status === "awaiting_test_data_or_generate" ||
     status === "awaiting_test_data";
 
   const isResults =
@@ -332,6 +354,14 @@ export default function Home() {
             />
           </div>
 
+        ) : status === "awaiting_test_data_or_generate" && session.threadId ? (
+          /* ── Optional early test data upload ── */
+          <EarlyTestDataScreen
+            threadId={session.threadId}
+            onSkipped={handleEarlyDataSkipped}
+            onUploaded={handleEarlyDataUploaded}
+          />
+
         ) : status === "awaiting_review" && session.threadId ? (
           /* ── Human review of test cases ── */
           <TestReviewPanel
@@ -342,6 +372,13 @@ export default function Home() {
         ) : status === "awaiting_playwright_confirmation" && session.threadId ? (
           /* ── Playwright confirmation ── */
           <PlaywrightConfirmScreen threadId={session.threadId} />
+
+        ) : status === "awaiting_load_test_config" && session.threadId ? (
+          /* ── Load test script creation ── */
+          <LoadTestConfigScreen
+            threadId={session.threadId}
+            onDone={() => updateStatus("ready_to_execute")}
+          />
 
         ) : isResults && session.threadId ? (
           /* ── Results: test cases + feature files + playwright ── */

@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path as _PathLib
 from typing import Any
 
@@ -26,6 +27,7 @@ from app.agents.prompts import (
     CONTEXT_SUMMARY_PROMPT,
     GENERATE_FEATURE_SCENARIO_PROMPT,
     GENERATE_PLAYWRIGHT_MODULE_PROMPT,
+    GENERATE_QUESTIONNAIRE_PROMPT,
     GENERATE_TESTS_BATCH_PROMPT,
     GENERATE_TESTS_PROMPT,
     GENERATE_WORKFLOW_PROMPT,
@@ -34,6 +36,7 @@ from app.agents.prompts import (
     TEST_DATA_SCHEMA_PROMPT,
 )
 from app.agents.response_models import (
+    QuestionnaireQuestionsOutput,
     TestCaseListOutput,
     TestDataColumn,
     TestDataSchemaOutput,
@@ -44,6 +47,32 @@ from app.rag.ingestor import build_api_metadata_map, ingest_file
 from app.services.llm_service import get_llm
 
 logger = logging.getLogger("apitests_ai.nodes")
+
+# ---------------------------------------------------------------------------
+# Schema trimming — prevents "length" finish_reason on large Postman collections
+# ---------------------------------------------------------------------------
+
+_SCHEMA_PAYLOAD_BUDGET = 2000   # chars per request/response payload field (test-gen prompts)
+_CODEGEN_PAYLOAD_BUDGET = 800   # tighter budget for feature/playwright prompts (heavy instruction text)
+_MODULE_SPLIT_THRESHOLD = 15    # test cases per Gherkin/Playwright module before sub-batching
+_MODULE_SUBBATCH_SIZE = 10      # target size of each sub-batch
+
+
+def _trim_endpoint_schema(ep_data: dict, budget: int = _SCHEMA_PAYLOAD_BUDGET) -> dict:
+    """Return a copy of ep_data with oversized payload fields truncated to `budget` chars."""
+    trimmed = dict(ep_data)
+    for field in ("request_payload", "response_payload"):
+        if field not in trimmed:
+            continue
+        serialized = json.dumps(trimmed[field], ensure_ascii=False)
+        if len(serialized) > budget:
+            trimmed[field] = serialized[:budget] + "…(truncated)"
+    return trimmed
+
+
+def _trim_api_metadata(api_metadata: dict, budget: int = _SCHEMA_PAYLOAD_BUDGET) -> dict:
+    """Apply _trim_endpoint_schema to every entry in api_metadata."""
+    return {name: _trim_endpoint_schema(data, budget) for name, data in api_metadata.items()}
 
 
 # ---------------------------------------------------------------------------
@@ -147,40 +176,11 @@ def ingest_and_index(state: TestCopilotState) -> dict[str, Any]:
             if context_doc_names else ""
         )
 
-        # For structured specs (Postman / OpenAPI) suggest the test data schema upfront
-        # so the user can optionally upload a data file BEFORE test case generation.
-        if endpoints_summary:
-            try:
-                schema_suggestion = _suggest_test_data_schema([], endpoints_summary)
-            except Exception as _exc:
-                logger.warning("Early schema suggestion failed for session '%s': %s", session_id, _exc)
-                schema_suggestion = None
-
-            # Only show the early-upload window if the schema has at least one column row
-            if schema_suggestion and "| `" in schema_suggestion:
-                msg = (
-                    f"Indexed **{len(chunks)} chunks** from your spec ({ep_info}){ctx_info}.\n\n"
-                    "**Optional: Upload test data before generating test cases**\n\n"
-                    "If you have test data ready, uploading it now will generate richer test cases "
-                    "with real values in assertions (instead of placeholders).\n\n"
-                    "Based on your API spec, here's the suggested schema for your test data file:\n\n"
-                    f"{schema_suggestion}\n\n"
-                    "**Supported formats:** CSV · Excel (.xlsx) · JSON array — upload via the 📎 button.\n\n"
-                    "Or click **Proceed** to skip and start test case generation now."
-                )
-                next_step = "awaiting_test_data_or_generate"
-            else:
-                msg = (
-                    f"Indexed **{len(chunks)} chunks** from your spec ({ep_info}){ctx_info}. "
-                    "Now generating comprehensive test cases — this may take a moment..."
-                )
-                next_step = "generating"
-        else:
-            msg = (
-                f"Indexed **{len(chunks)} chunks** from your spec ({ep_info}){ctx_info}. "
-                "Now generating comprehensive test cases — this may take a moment..."
-            )
-            next_step = "generating"
+        msg = (
+            f"Indexed **{len(chunks)} chunks** from your spec ({ep_info}){ctx_info}. "
+            "Now generating comprehensive test cases — this may take a moment..."
+        )
+        next_step = "generating"
 
         return {
             "current_step": next_step,
@@ -228,25 +228,26 @@ def _batch_generate_test_cases(
     """
     Generate test cases in endpoint-sized batches so every endpoint is covered,
     regardless of collection size.  Avoids the FAISS top-k cutoff problem.
+
+    On output-parse failure (typically a "length" finish_reason causing truncated JSON),
+    the failing batch is split in half and each half retried independently.
     """
     from app.core.config import settings
     batch_size = settings.endpoint_batch_size
     batches = [endpoints_summary[i:i + batch_size] for i in range(0, len(endpoints_summary), batch_size)]
     all_cases: list[dict] = []
-    id_counter = 1
 
-    for idx, batch in enumerate(batches, start=1):
+    def _invoke_one_batch(batch: list[dict]) -> list[dict]:
         endpoint_list = ", ".join(f"{ep['method']} {ep['endpoint']}" for ep in batch)
-        logger.info("Generating batch %d/%d — endpoints: %s", idx, len(batches), endpoint_list)
         context = "\n\n---\n\n".join(ep["content"] for ep in batch)
 
-        # Build compact metadata section for only the endpoints in this batch
+        # Build compact, trimmed metadata for only the endpoints in this batch
         batch_metadata: dict = {}
         if api_metadata_map:
             for ep in batch:
                 ep_name = ep.get("endpoint", "")
                 if ep_name in api_metadata_map:
-                    batch_metadata[ep_name] = api_metadata_map[ep_name]
+                    batch_metadata[ep_name] = _trim_endpoint_schema(api_metadata_map[ep_name])
         api_metadata_json = json.dumps(batch_metadata, indent=2) if batch_metadata else "(not available)"
 
         test_data_json = json.dumps(test_data, indent=2) if test_data else "(none)"
@@ -259,15 +260,45 @@ def _batch_generate_test_cases(
             questionnaire=questionnaire or "(none provided)",
             test_data=test_data_json,
         )
-        result: TestCaseListOutput = structured_llm.invoke(
-            [SystemMessage(content=SYSTEM_PROMPT), HumanMessage(content=prompt)]
-        )
-        batch_cases = [tc.model_dump() for tc in result.test_cases]
-        for tc in batch_cases:
-            tc["id"] = f"TC-{id_counter:03d}"
-            id_counter += 1
+        try:
+            result: TestCaseListOutput = structured_llm.invoke(
+                [SystemMessage(content=SYSTEM_PROMPT), HumanMessage(content=prompt)]
+            )
+            return [tc.model_dump() for tc in result.test_cases]
+        except Exception as exc:
+            # Only retry on truncation / parse errors — not auth/rate-limit failures,
+            # which would recursively split down to single endpoints and exhaust quota.
+            _non_retryable = {
+                "AuthenticationError", "PermissionDeniedError",
+                "RateLimitError", "APIConnectionError",
+            }
+            if len(batch) > 1 and type(exc).__name__ not in _non_retryable:
+                logger.warning(
+                    "Batch generation failed (%s: %s) — retrying with halved batch of %d endpoints",
+                    type(exc).__name__, exc, len(batch),
+                )
+                mid = len(batch) // 2
+                return _invoke_one_batch(batch[:mid]) + _invoke_one_batch(batch[mid:])
+            logger.error("Generation failed for '%s' (%s: %s)", endpoint_list, type(exc).__name__, exc)
+            return []
+
+    for idx, batch in enumerate(batches, start=1):
+        ep_list_str = ", ".join(f"{ep['method']} {ep['endpoint']}" for ep in batch)
+        logger.info("Batch %d/%d — endpoints: %s", idx, len(batches), ep_list_str)
+
+    # Run all batches in parallel — they are independent of each other.
+    # executor.map preserves input order so IDs remain deterministic.
+    logger.info("Running %d batch(es) in parallel (max_workers=5)", len(batches))
+    with ThreadPoolExecutor(max_workers=min(len(batches), 5)) as executor:
+        batch_results = list(executor.map(_invoke_one_batch, batches))
+
+    for idx, batch_cases in enumerate(batch_results, start=1):
         all_cases.extend(batch_cases)
-        logger.info("Batch %d/%d → %d cases (running total: %d)", idx, len(batches), len(batch_cases), len(all_cases))
+        logger.info("Batch %d → %d cases (running total: %d)", idx, len(batch_cases), len(all_cases))
+
+    # Assign sequential IDs after all batches complete
+    for i, tc in enumerate(all_cases, start=1):
+        tc["id"] = f"TC-{i:03d}"
 
     return all_cases
 
@@ -306,9 +337,12 @@ def _generate_workflow_test_cases(
         f"- {ep['method']} {ep['endpoint']}" for ep in endpoints_summary
     )
 
-    # Sample a few endpoints' full content to ground the LLM on actual payloads/schemas
-    sample_size = min(4, len(endpoints_summary))
-    context_sample = "\n\n---\n\n".join(ep["content"] for ep in endpoints_summary[:sample_size])
+    # Include ALL endpoints but truncate content tightly so every endpoint's schema is visible.
+    # Previously only sampled the first 4, leaving the rest without any payload context.
+    _WORKFLOW_EP_BUDGET = 400   # chars of content per endpoint in the workflow prompt
+    context_sample = "\n\n---\n\n".join(
+        ep["content"][:_WORKFLOW_EP_BUDGET] for ep in endpoints_summary
+    )[:12000]  # hard cap for very large collections
 
     logger.info("Generating %d workflow test cases across %d endpoints", n_workflows, len(endpoints_summary))
     test_data_json = json.dumps(test_data, indent=2) if test_data else "(none)"
@@ -338,120 +372,179 @@ def _generate_workflow_test_cases(
 # Node: collect_questionnaire
 # ---------------------------------------------------------------------------
 
-def _format_questionnaire_for_context(answers: dict) -> str:
-    """
-    Convert the structured questionnaire answers dict into a readable text block
-    for injection into generation prompts.
-    """
-    lines: list[str] = ["## Intake Questionnaire Answers\n"]
+# Fallback questions shown when LLM question-generation fails
+_FALLBACK_QUESTIONS: list[dict] = [
+    {
+        "id": "q_error_codes",
+        "question": "What HTTP status codes does your API return for common error classes?",
+        "type": "textarea",
+        "options": [],
+        "hint": "E.g. '422 validation, 401 auth, 404 not found, 409 conflict' — makes every error assertion precise",
+        "category": "error_codes",
+    },
+    {
+        "id": "q_pii_fields",
+        "question": "Which response fields should NEVER appear in API responses (PII / sensitive data)?",
+        "type": "text",
+        "options": [],
+        "hint": "E.g. password, ssn, credit_card_number — adds absence assertions to every success response",
+        "category": "pii",
+    },
+    {
+        "id": "q_business_rules",
+        "question": "Are there business validation rules NOT documented in the spec that should be tested?",
+        "type": "textarea",
+        "options": [],
+        "hint": "E.g. 'Email must be lowercase', 'Username: 3-20 chars' — each rule becomes a negative test case",
+        "category": "business_rules",
+    },
+    {
+        "id": "q_critical_flows",
+        "question": "Describe any critical multi-step user journeys that must be covered end-to-end.",
+        "type": "textarea",
+        "options": [],
+        "hint": "E.g. 'Login → Create order → Pay → Receipt' — becomes dedicated E2E workflow test cases",
+        "category": "workflow",
+    },
+]
 
-    # Section 1: API Identity
+
+def _format_questionnaire_for_context(answers: dict, questions: list[dict] | None = None) -> str:
+    """
+    Convert questionnaire answers into a readable text block for injection into generation prompts.
+
+    Handles two answer shapes:
+    - Dynamic (new): flat {q_id: answer_value} — uses `questions` list for labels
+    - Legacy (old):  nested {s1: {...}, s2: {...}, ...} — uses the original section formatter
+    """
+    # Detect dynamic format: keys are question IDs, not section keys
+    is_dynamic = bool(answers) and "s1" not in answers
+
+    if is_dynamic and questions:
+        lines: list[str] = ["## Questionnaire Answers\n"]
+        q_by_id = {q["id"]: q for q in questions}
+        for q_id, answer in answers.items():
+            q = q_by_id.get(q_id, {})
+            question_text = q.get("question", q_id)
+            category = q.get("category", "")
+            if isinstance(answer, list):
+                answer_str = ", ".join(str(v) for v in answer) if answer else ""
+            else:
+                answer_str = str(answer).strip()
+            if answer_str:
+                lines.append(f"**{question_text}**")
+                if category:
+                    lines.append(f"  [{category}]")
+                lines.append(f"  {answer_str}\n")
+        return "\n".join(lines)
+
+    # Legacy nested format
+    lines_l: list[str] = ["## Intake Questionnaire Answers\n"]
+
     s1 = answers.get("s1", {})
     if any(s1.values()):
-        lines.append("### API Identity")
+        lines_l.append("### API Identity")
         if s1.get("product_name"):
-            lines.append(f"- Product / API name: {s1['product_name']}")
+            lines_l.append(f"- Product / API name: {s1['product_name']}")
         if s1.get("auth_type"):
-            lines.append(f"- Authentication: {s1['auth_type']}")
+            lines_l.append(f"- Authentication: {s1['auth_type']}")
         if s1.get("base_url"):
-            lines.append(f"- Test environment base URL: {s1['base_url']}")
+            lines_l.append(f"- Test environment base URL: {s1['base_url']}")
         if s1.get("user_roles"):
             roles = s1["user_roles"] if isinstance(s1["user_roles"], list) else [s1["user_roles"]]
-            lines.append(f"- User roles: {', '.join(roles)}")
-        lines.append("")
+            lines_l.append(f"- User roles: {', '.join(roles)}")
+        lines_l.append("")
 
-    # Section 2: Critical Endpoints
     s2 = answers.get("s2", {})
     if s2.get("p1_endpoints"):
         endpoints = s2["p1_endpoints"] if isinstance(s2["p1_endpoints"], list) else [s2["p1_endpoints"]]
         if endpoints:
-            lines.append("### P1-Critical Endpoints (generate more depth for these)")
+            lines_l.append("### P1-Critical Endpoints (generate more depth for these)")
             for ep in endpoints:
-                lines.append(f"- {ep}")
-            lines.append("")
+                lines_l.append(f"- {ep}")
+            lines_l.append("")
     if s2.get("error_codes"):
         ec = s2["error_codes"]
         if any(ec.values()):
-            lines.append("### Error Code Mapping")
+            lines_l.append("### Error Code Mapping")
             for category, code in ec.items():
                 if code:
-                    lines.append(f"- {category}: HTTP {code}")
-            lines.append("")
+                    lines_l.append(f"- {category}: HTTP {code}")
+            lines_l.append("")
     if s2.get("idempotent_endpoints"):
         idems = s2["idempotent_endpoints"] if isinstance(s2["idempotent_endpoints"], list) else [s2["idempotent_endpoints"]]
         if idems:
-            lines.append("### Idempotent Endpoints (duplicate-call tests should expect 2xx not 409)")
+            lines_l.append("### Idempotent Endpoints (duplicate-call tests should expect 2xx not 409)")
             for ep in idems:
-                lines.append(f"- {ep}")
-            lines.append("")
+                lines_l.append(f"- {ep}")
+            lines_l.append("")
 
-    # Section 3: Business Rules
     s3 = answers.get("s3", {})
     if s3.get("validation_rules"):
-        lines.append("### Business Validation Rules")
-        lines.append(s3["validation_rules"].strip())
-        lines.append("")
+        lines_l.append("### Business Validation Rules")
+        lines_l.append(s3["validation_rules"].strip())
+        lines_l.append("")
     if s3.get("pii_fields"):
         fields = s3["pii_fields"] if isinstance(s3["pii_fields"], list) else [s3["pii_fields"]]
         if fields:
-            lines.append(f"### PII / Sensitive Fields (must NEVER appear in API responses): {', '.join(fields)}")
-            lines.append("")
+            lines_l.append(f"### PII / Sensitive Fields (must NEVER appear in API responses): {', '.join(fields)}")
+            lines_l.append("")
     if s3.get("data_constraints"):
-        lines.append("### Additional Data Constraints")
-        lines.append(s3["data_constraints"].strip())
-        lines.append("")
+        lines_l.append("### Additional Data Constraints")
+        lines_l.append(s3["data_constraints"].strip())
+        lines_l.append("")
 
-    # Section 4: Workflow Journeys
     s4 = answers.get("s4", {})
     journeys = s4.get("user_journeys", [])
     if journeys:
-        lines.append("### User Journeys (use these as the basis for E2E workflow test cases)")
+        lines_l.append("### User Journeys (use these as the basis for E2E workflow test cases)")
         for i, j in enumerate(journeys, 1):
             if j.get("name") or j.get("steps"):
-                lines.append(f"\nJourney {i} — \"{j.get('name', 'Unnamed')}\"")
+                lines_l.append(f"\nJourney {i} — \"{j.get('name', 'Unnamed')}\"")
                 if j.get("goal"):
-                    lines.append(f"  Goal: {j['goal']}")
+                    lines_l.append(f"  Goal: {j['goal']}")
                 if j.get("steps"):
-                    lines.append(f"  Steps: {j['steps']}")
-        lines.append("")
+                    lines_l.append(f"  Steps: {j['steps']}")
+        lines_l.append("")
     if s4.get("state_machines"):
-        lines.append("### Resource State Machines")
-        lines.append(s4["state_machines"].strip())
-        lines.append("")
+        lines_l.append("### Resource State Machines")
+        lines_l.append(s4["state_machines"].strip())
+        lines_l.append("")
     if s4.get("failure_scenarios"):
-        lines.append("### Known Multi-Step Failure Scenarios")
-        lines.append(s4["failure_scenarios"].strip())
-        lines.append("")
+        lines_l.append("### Known Multi-Step Failure Scenarios")
+        lines_l.append(s4["failure_scenarios"].strip())
+        lines_l.append("")
 
-    # Section 5: Test Preferences
     s5 = answers.get("s5", {})
     if s5.get("test_types"):
         types = s5["test_types"] if isinstance(s5["test_types"], list) else [s5["test_types"]]
         if types:
-            lines.append(f"### Priority Test Types: {', '.join(types)}")
+            lines_l.append(f"### Priority Test Types: {', '.join(types)}")
     if s5.get("negative_pct"):
-        lines.append(f"### Negative/Edge Case Target: {s5['negative_pct']}% of total test cases")
+        lines_l.append(f"### Negative/Edge Case Target: {s5['negative_pct']}% of total test cases")
     if s5.get("custom_tags"):
         tags = s5["custom_tags"] if isinstance(s5["custom_tags"], list) else [s5["custom_tags"]]
         if tags:
-            lines.append(f"### Custom Gherkin Tags: {', '.join(tags)}")
+            lines_l.append(f"### Custom Gherkin Tags: {', '.join(tags)}")
 
-    return "\n".join(lines)
+    return "\n".join(lines_l)
 
 
 def collect_questionnaire(state: TestCopilotState) -> dict[str, Any]:
     """
     Interrupt node: waits for the user to fill the intake questionnaire.
-    First pass → sets current_step='awaiting_questionnaire' so the frontend renders the panel.
-    After the user submits, the /questionnaire endpoint calls g.update_state() to push
-    answers into state and resumes the graph; this node then formats the answers into
-    context_summary and signals progression to generate_test_cases.
+
+    First pass  → calls LLM to generate targeted questions based on spec gaps →
+                  stores in state as questionnaire_questions → sets awaiting_questionnaire.
+    Second pass → formats submitted answers and merges into context_summary → generating.
     """
+    from app.core.config import settings as _cfg
     answers = state.get("questionnaire_answers") or {}
 
     if answers:
         # Questionnaire submitted — format and augment context_summary
-        formatted = _format_questionnaire_for_context(answers)
+        questions = state.get("questionnaire_questions") or []
+        formatted = _format_questionnaire_for_context(answers, questions)
         existing_summary = state.get("context_summary") or ""
         combined_summary = (existing_summary + "\n\n" + formatted).strip()
         return {
@@ -459,32 +552,52 @@ def collect_questionnaire(state: TestCopilotState) -> dict[str, Any]:
             "context_summary": combined_summary,
         }
 
-    # First pass — no answers yet, display prompt and endpoint list
+    # First pass — generate targeted questions via LLM
     endpoints_summary = state.get("endpoints_summary", [])
+    api_metadata_map = state.get("api_metadata_map", {})
+    context_summary = state.get("context_summary") or ""
+
     ep_count = len(endpoints_summary)
-    ep_list = "\n".join(
-        f"- {ep['method']} {ep['endpoint']}"
-        for ep in endpoints_summary
-    )
+    ep_list_text = "\n".join(f"- {ep['method']} {ep['endpoint']}" for ep in endpoints_summary)
+
+    # Compact api_metadata summary (trimmed) for the questionnaire prompt
+    trimmed_meta = _trim_api_metadata(api_metadata_map)
+    api_meta_summary = json.dumps(trimmed_meta, indent=2)[:6000]  # cap at 6KB for the prompt
+
+    questions: list[dict] = []
+    try:
+        llm = get_llm(max_tokens=2000)
+        structured_llm = llm.with_structured_output(QuestionnaireQuestionsOutput)
+        prompt = GENERATE_QUESTIONNAIRE_PROMPT.format(
+            endpoint_list=ep_list_text or "(no structured endpoints detected)",
+            api_metadata_summary=api_meta_summary or "(not available)",
+            context_summary=context_summary or "(none)",
+        )
+        result: QuestionnaireQuestionsOutput = structured_llm.invoke(
+            [SystemMessage(content=SYSTEM_PROMPT), HumanMessage(content=prompt)]
+        )
+        questions = [q.model_dump() for q in result.questions]
+        logger.info("Generated %d dynamic questionnaire questions for session '%s'", len(questions), state.get("session_id"))
+    except Exception as exc:
+        logger.warning("Dynamic question generation failed (%s) — using fallback questions", exc)
+        questions = _FALLBACK_QUESTIONS
 
     if ep_count:
         msg = (
             f"Indexed **{ep_count} endpoints**. Before generating tests, I have a few "
-            "questions to help produce higher-quality, business-aware test cases.\n\n"
-            "Fill the questionnaire on the right — every question is optional, skip "
-            "anything you don't want to answer, or click **Generate Tests** to proceed "
-            "with defaults.\n\n"
-            f"**Discovered endpoints:**\n{ep_list}"
+            "targeted questions based on what's missing from your spec.\n\n"
+            "Answer what you can — every question is optional, or click **Skip & Generate** to proceed now.\n\n"
+            f"**Discovered endpoints:**\n{ep_list_text}"
         )
     else:
         msg = (
-            "Spec indexed. Before generating tests, I have a few questions to help "
-            "produce higher-quality test cases.\n\n"
-            "Fill the questionnaire on the right — every question is optional."
+            "Spec indexed. Before generating tests, I have a few targeted questions "
+            "to fill gaps that would improve test quality.\n\nEvery question is optional."
         )
 
     return {
         "current_step": "awaiting_questionnaire",
+        "questionnaire_questions": questions,
         "messages": [AIMessage(content=msg)],
     }
 
@@ -501,9 +614,10 @@ def generate_test_cases(state: TestCopilotState) -> dict[str, Any]:
       guaranteeing every endpoint is covered regardless of collection size.
     - Unstructured files (PDF / DOCX / text): fallback to broad-query RAG (original behaviour).
     """
+    from app.core.config import settings as _cfg
     session_id = state["session_id"]
     endpoints_summary = state.get("endpoints_summary", [])
-    llm = get_llm()
+    llm = get_llm(max_tokens=_cfg.llm_max_tokens_test_gen)
 
     if endpoints_summary:
         from app.core.config import settings as _s
@@ -513,7 +627,8 @@ def generate_test_cases(state: TestCopilotState) -> dict[str, Any]:
         context_summary = state.get("context_summary", "")
         test_data: list[dict] = state.get("test_data", [])
         questionnaire_answers = state.get("questionnaire_answers") or {}
-        questionnaire_text = _format_questionnaire_for_context(questionnaire_answers) if questionnaire_answers else ""
+        questionnaire_questions = state.get("questionnaire_questions") or []
+        questionnaire_text = _format_questionnaire_for_context(questionnaire_answers, questionnaire_questions) if questionnaire_answers else ""
         if test_data:
             logger.info("Early test data available (%d rows) — injecting into test case generation", len(test_data))
         if questionnaire_answers:
@@ -526,15 +641,20 @@ def generate_test_cases(state: TestCopilotState) -> dict[str, Any]:
             questionnaire=questionnaire_text,
         )
 
-        # Second pass: cross-API workflow / E2E test cases
-        workflow_cases = _generate_workflow_test_cases(
-            endpoints_summary, llm,
-            start_id=len(test_cases) + 1,
-            context_summary=context_summary,
-            test_data=test_data or None,
-            questionnaire=questionnaire_text,
-        )
-        test_cases.extend(workflow_cases)
+        # Second pass: cross-API workflow / E2E test cases.
+        # Wrapped in try/except: a workflow LLM failure must never abort the whole node —
+        # we still have the per-endpoint test cases from the first pass.
+        try:
+            workflow_cases = _generate_workflow_test_cases(
+                endpoints_summary, llm,
+                start_id=len(test_cases) + 1,
+                context_summary=context_summary,
+                test_data=test_data or None,
+                questionnaire=questionnaire_text,
+            )
+            test_cases.extend(workflow_cases)
+        except Exception as exc:
+            logger.warning("Workflow test case generation failed (continuing without E2E cases): %s", exc)
 
         rag_context = _assemble_rag_context(session_id, "API endpoints request response authentication authorization")
     else:
@@ -595,12 +715,18 @@ def human_review(state: TestCopilotState) -> dict[str, Any]:
 
 def improve_test_cases(state: TestCopilotState) -> dict[str, Any]:
     """Incorporate human feedback and regenerate / augment test cases."""
+    from app.core.config import settings as _cfg
     feedback = state.get("human_feedback", "")
-    existing = json.dumps(state.get("manual_test_cases", []), indent=2)
+    existing_cases = state.get("manual_test_cases", [])
+    existing = json.dumps(existing_cases, indent=2)
     session_id = state["session_id"]
     rag_context = _assemble_rag_context(session_id, feedback or "test cases improvement")
 
-    llm = get_llm()
+    # Scale token budget with suite size: ~350 tokens per test case in JSON output.
+    # The default llm_max_tokens_test_gen (8000) silently truncates suites of 25+ cases.
+    n_cases = len(existing_cases)
+    dynamic_max = min(max(_cfg.llm_max_tokens_test_gen, n_cases * 350), 24000)
+    llm = get_llm(max_tokens=dynamic_max)
     prompt = IMPROVE_TESTS_PROMPT.format(
         existing_test_cases=existing,
         feedback=feedback,
@@ -672,10 +798,11 @@ def _suggest_test_data_schema(test_cases: list[dict], endpoints_summary: list[di
     merged: dict[str, TestDataColumn] = {}
     structured_llm = llm.with_structured_output(TestDataSchemaOutput)
 
-    for endpoint, tcs in endpoint_groups.items():
-        body_fields = ep_body_lookup.get(endpoint, [])
+    def _schema_for_endpoint(args: tuple) -> list[TestDataColumn]:
+        ep, tcs = args
+        body_fields = ep_body_lookup.get(ep, [])
         prompt = TEST_DATA_SCHEMA_PROMPT.format(
-            endpoint=endpoint,
+            endpoint=ep,
             body_fields=json.dumps(body_fields),
             test_cases=json.dumps(tcs, indent=2),
         )
@@ -683,11 +810,19 @@ def _suggest_test_data_schema(test_cases: list[dict], endpoints_summary: list[di
             result = structured_llm.invoke(
                 [SystemMessage(content=SYSTEM_PROMPT), HumanMessage(content=prompt)]
             )
-            for col in result.columns:  # type: ignore[union-attr]
-                if col.name and col.name not in merged:
-                    merged[col.name] = col
+            return [col for col in result.columns if col.name]  # type: ignore[union-attr]
         except Exception as exc:
-            logger.warning("Schema LLM call failed for %s: %s", endpoint, exc)
+            logger.warning("Schema LLM call failed for %s: %s", ep, exc)
+            return []
+
+    # All endpoint groups are independent — run in parallel.
+    with ThreadPoolExecutor(max_workers=min(len(endpoint_groups), 8)) as executor:
+        all_col_lists = list(executor.map(_schema_for_endpoint, endpoint_groups.items()))
+
+    for col_list in all_col_lists:
+        for col in col_list:
+            if col.name not in merged:
+                merged[col.name] = col
 
     # Deterministic fallback when LLM produced nothing
     if len(merged) == 0:
@@ -799,12 +934,14 @@ def generate_feature_files(g: Any, config: dict, state_values: dict) -> None:
 
     from app.core.config import settings
 
+    from app.core.config import settings as _cfg
+
     test_cases: list[dict] = state_values.get("manual_test_cases", [])
     api_metadata: dict = state_values.get("api_metadata_map", {})
     test_data: list[dict] = state_values.get("test_data", [])
     session_id: str = state_values.get("session_id", "unknown")
 
-    llm = get_llm()
+    llm = get_llm(max_tokens=_cfg.llm_max_tokens_codegen)
     total = len(test_cases)
 
     g.update_state(config, {
@@ -823,22 +960,17 @@ def generate_feature_files(g: Any, config: dict, state_values: dict) -> None:
     out_dir = os.path.join(settings.generated_tests_dir, session_id, "features")
     os.makedirs(out_dir, exist_ok=True)
 
-    api_names_json    = json.dumps(list(api_metadata.keys()), indent=2)
-    api_metadata_json = json.dumps(api_metadata, indent=2)
+    # Tighter payload budget for codegen prompts — heavy instruction text leaves less room for schemas
+    trimmed_metadata = _trim_api_metadata(api_metadata, budget=_CODEGEN_PAYLOAD_BUDGET)
+    api_names_json    = json.dumps(list(trimmed_metadata.keys()), indent=2)
+    api_metadata_json = json.dumps(trimmed_metadata, indent=2)
 
     feature_files: list[str] = []
     first_file: str = ""
     total_modules = len(module_groups)
 
-    for idx, (module, cases) in enumerate(module_groups.items(), 1):
-        slug = _module_to_slug(module)
-        tag  = slug.upper()[:30]  # keep Gherkin tags short
-
-        logger.info(
-            "Generating feature file %d/%d for module '%s' (%d cases)",
-            idx, total_modules, module, len(cases),
-        )
-
+    def _invoke_feature_batch(module: str, tag: str, cases: list[dict]) -> str:
+        """Generate Gherkin for one batch of test cases within a module."""
         prompt = GENERATE_FEATURE_SCENARIO_PROMPT.format(
             feature_name=module,
             feature_tag=tag,
@@ -847,29 +979,63 @@ def generate_feature_files(g: Any, config: dict, state_values: dict) -> None:
             test_data=json.dumps(test_data, indent=2) if test_data else "(none)",
             test_cases=json.dumps(cases, indent=2),
         )
+        response = llm.invoke([SystemMessage(content=SYSTEM_PROMPT), HumanMessage(content=prompt)])
+        content = str(response.content).strip()
+        if content.startswith("```"):
+            lines = content.split("\n")
+            content = "\n".join(lines[1:-1] if lines[-1].strip() == "```" else lines[1:])
+        return content
+
+    def _generate_one_feature_module(args: tuple) -> tuple[int, str, str, list[dict], str]:
+        """Generate Gherkin content for one module. Returns (idx, module, slug, cases, content)."""
+        idx, module, cases = args
+        slug = _module_to_slug(module)
+        tag  = slug.upper()[:30]
+        logger.info("Generating feature file %d/%d for module '%s' (%d cases)", idx, total_modules, module, len(cases))
         try:
-            response = llm.invoke([SystemMessage(content=SYSTEM_PROMPT), HumanMessage(content=prompt)])
-            content = str(response.content).strip()
-            # Strip markdown code fences if the LLM wrapped the output
-            if content.startswith("```"):
-                lines = content.split("\n")
-                content = "\n".join(lines[1:-1] if lines[-1].strip() == "```" else lines[1:])
+            if len(cases) > _MODULE_SPLIT_THRESHOLD:
+                logger.info("Module '%s' has %d cases; splitting into sub-batches of %d", module, len(cases), _MODULE_SUBBATCH_SIZE)
+                parts: list[str] = []
+                for sub_start in range(0, len(cases), _MODULE_SUBBATCH_SIZE):
+                    sub = cases[sub_start:sub_start + _MODULE_SUBBATCH_SIZE]
+                    parts.append(_invoke_feature_batch(module, tag, sub))
+                content = parts[0]
+                for part in parts[1:]:
+                    lines = part.splitlines()
+                    scenario_start = next(
+                        (i for i, l in enumerate(lines) if l.strip().startswith("Scenario")), 0
+                    )
+                    content += "\n\n" + "\n".join(lines[scenario_start:])
+            else:
+                content = _invoke_feature_batch(module, tag, cases)
         except Exception as exc:
             logger.warning("Feature generation failed for module '%s': %s", module, exc)
             content = f"Feature: {module}\n\n  # GENERATION FAILED: {exc}\n"
+        return (idx, module, slug, cases, content)
 
+    # Generate all modules in parallel — each is independent; disk writes happen after.
+    g.update_state(config, {
+        "current_step": "generating_automation",
+        "messages": [AIMessage(
+            content=f"Generating **{total_modules} feature module(s)** in parallel for **{total} test cases**..."
+        )],
+    })
+
+    module_args = [
+        (idx, module, cases)
+        for idx, (module, cases) in enumerate(module_groups.items(), 1)
+    ]
+    with ThreadPoolExecutor(max_workers=min(total_modules, 5)) as executor:
+        module_results = list(executor.map(_generate_one_feature_module, module_args))
+
+    # Write to disk in original order (executor.map preserves order)
+    for idx, module, slug, cases, content in module_results:
         feature_file = os.path.join(out_dir, f"{slug}.feature")
         Path(feature_file).write_text(content, encoding="utf-8")
         feature_files.append(feature_file)
         if not first_file:
             first_file = feature_file
-
-        g.update_state(config, {
-            "current_step": "generating_automation",
-            "messages": [AIMessage(
-                content=f"**{idx}/{total_modules}** — Generated: *{module}* ({len(cases)} scenarios)"
-            )],
-        })
+        logger.info("Wrote feature file for module '%s' (%d cases)", module, len(cases))
 
     logger.info(
         "Feature generation complete: %d file(s) → %s", len(feature_files), out_dir
@@ -907,12 +1073,14 @@ def generate_playwright_tests(g: Any, config: dict, state_values: dict) -> None:
 
     from app.core.config import settings
 
+    from app.core.config import settings as _cfg
+
     test_cases: list[dict] = state_values.get("manual_test_cases", [])
     api_metadata: dict = state_values.get("api_metadata_map", {})
     test_data: list[dict] = state_values.get("test_data", [])
     session_id: str = state_values.get("session_id", "unknown")
 
-    llm = get_llm()
+    llm = get_llm(max_tokens=_cfg.llm_max_tokens_codegen)
 
     # Rebuild module_groups from test_cases (same grouping as Phase 1)
     module_groups: dict[str, list[dict]] = {}
@@ -921,7 +1089,8 @@ def generate_playwright_tests(g: Any, config: dict, state_values: dict) -> None:
         module_groups.setdefault(module, []).append(tc)
 
     total_modules = len(module_groups)
-    api_metadata_json = json.dumps(api_metadata, indent=2)
+    # Tighter payload budget for codegen prompts
+    api_metadata_json = json.dumps(_trim_api_metadata(api_metadata, budget=_CODEGEN_PAYLOAD_BUDGET), indent=2)
     session_dir = os.path.join(settings.generated_tests_dir, session_id)
     columns = list(test_data[0].keys()) if test_data else []
 
@@ -949,19 +1118,7 @@ def api_request_context(playwright: Playwright, base_url: str):
 '''
     _PathLib(os.path.join(session_dir, "conftest.py")).write_text(conftest_content, encoding="utf-8")
 
-    # Generate per-module Playwright test functions (one LLM call per module)
-    all_functions: list[str] = []
-    for idx, (module, cases) in enumerate(module_groups.items(), 1):
-        logger.info(
-            "Generating Playwright tests %d/%d for module '%s'",
-            idx, total_modules, module,
-        )
-        g.update_state(config, {
-            "current_step": "generating_automation",
-            "messages": [AIMessage(
-                content=f"**{idx}/{total_modules}** — Playwright: *{module}*"
-            )],
-        })
+    def _invoke_playwright_batch(module: str, cases: list[dict]) -> str:
         prompt = GENERATE_PLAYWRIGHT_MODULE_PROMPT.format(
             module_name=module,
             test_cases=json.dumps(cases, indent=2),
@@ -969,17 +1126,48 @@ def api_request_context(playwright: Playwright, base_url: str):
             api_metadata=api_metadata_json,
             test_data=json.dumps(test_data, indent=2) if test_data else "(none)",
         )
+        resp = llm.invoke([SystemMessage(content=SYSTEM_PROMPT), HumanMessage(content=prompt)])
+        funcs = str(resp.content).strip()
+        if funcs.startswith("```"):
+            lines = funcs.split("\n")
+            funcs = "\n".join(lines[1:-1] if lines[-1].strip() == "```" else lines[1:])
+        return funcs
+
+    def _generate_one_playwright_module(args: tuple) -> tuple[int, str, str]:
+        """Generate Playwright functions for one module. Returns (idx, module, functions_str)."""
+        idx, module, cases = args
+        logger.info("Generating Playwright tests %d/%d for module '%s'", idx, total_modules, module)
         try:
-            resp = llm.invoke([SystemMessage(content=SYSTEM_PROMPT), HumanMessage(content=prompt)])
-            funcs = str(resp.content).strip()
-            # Strip markdown fences if LLM wrapped output
-            if funcs.startswith("```"):
-                lines = funcs.split("\n")
-                funcs = "\n".join(lines[1:-1] if lines[-1].strip() == "```" else lines[1:])
-            all_functions.append(f"# ── {module} ──\n\n{funcs}")
+            if len(cases) > _MODULE_SPLIT_THRESHOLD:
+                logger.info("Module '%s' has %d cases; splitting into sub-batches of %d", module, len(cases), _MODULE_SUBBATCH_SIZE)
+                parts: list[str] = []
+                for sub_start in range(0, len(cases), _MODULE_SUBBATCH_SIZE):
+                    parts.append(_invoke_playwright_batch(module, cases[sub_start:sub_start + _MODULE_SUBBATCH_SIZE]))
+                funcs = "\n\n".join(parts)
+            else:
+                funcs = _invoke_playwright_batch(module, cases)
+            return (idx, module, f"# ── {module} ──\n\n{funcs}")
         except Exception as exc:
             logger.warning("Playwright generation failed for module '%s': %s", module, exc)
-            all_functions.append(f"# ── {module} ── (GENERATION FAILED: {exc})\n")
+            return (idx, module, f"# ── {module} ── (GENERATION FAILED: {exc})\n")
+
+    # Generate all modules in parallel — each is independent.
+    g.update_state(config, {
+        "current_step": "generating_automation",
+        "messages": [AIMessage(
+            content=f"Generating **{total_modules} Playwright module(s)** in parallel..."
+        )],
+    })
+
+    pw_args = [
+        (idx, module, cases)
+        for idx, (module, cases) in enumerate(module_groups.items(), 1)
+    ]
+    with ThreadPoolExecutor(max_workers=min(total_modules, 5)) as executor:
+        pw_results = list(executor.map(_generate_one_playwright_module, pw_args))
+
+    # Collect in original order (executor.map preserves order)
+    all_functions: list[str] = [funcs_str for _, _, funcs_str in pw_results]
 
     # Write test_generated.py
     test_data_repr = json.dumps(test_data, indent=2) if test_data else "[]"
@@ -987,6 +1175,7 @@ def api_request_context(playwright: Playwright, base_url: str):
         "import re\n"
         "import allure\n"
         "import pytest\n"
+        "import json\n"
         "from playwright.sync_api import APIRequestContext\n\n"
         f"TEST_DATA = {test_data_repr}\n\n"
     )
@@ -997,10 +1186,10 @@ def api_request_context(playwright: Playwright, base_url: str):
 
     g.update_state(config, {
         "generated_test_file": py_file,
-        "current_step": "ready_to_execute",
+        "current_step": "awaiting_load_test_config",
         "messages": [AIMessage(content=(
-            "Playwright test suite generated. Switch to the **Playwright Tests** tab, "
-            "then click **Run Tests**."
+            "Playwright test suite generated. You can now create performance load scripts "
+            "for selected API endpoints, or skip to proceed directly to test execution."
         ))],
     })
 
@@ -1033,7 +1222,12 @@ def execute_tests(state: TestCopilotState) -> dict[str, Any]:
             "messages": [AIMessage(content="No generated test file found. Please generate automated tests first.")],
         }
 
-    allure_results = settings.allure_results_dir
+    session_id = state.get("session_id", "")
+    allure_results = (
+        os.path.join(settings.allure_results_dir, session_id) if session_id
+        else settings.allure_results_dir
+    )
+    os.makedirs(allure_results, exist_ok=True)
     cmd = [
         "python", "-m", "pytest",
         test_file,

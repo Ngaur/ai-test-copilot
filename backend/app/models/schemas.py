@@ -22,6 +22,7 @@ class SessionStatus(str, Enum):
     AWAITING_TEST_DATA = "awaiting_test_data"
     GENERATING_AUTOMATION = "generating_automation"
     AWAITING_PLAYWRIGHT_CONFIRMATION = "awaiting_playwright_confirmation"
+    AWAITING_LOAD_TEST_CONFIG = "awaiting_load_test_config"
     READY_TO_EXECUTE = "ready_to_execute"
     EXECUTING = "executing"
     DONE = "done"
@@ -60,6 +61,7 @@ class HumanReviewRequest(BaseModel):
     thread_id: str
     approved: bool
     feedback: str | None = None
+    test_cases: list[dict] | None = None
 
 
 class QuestionnaireSubmitRequest(BaseModel):
@@ -124,6 +126,7 @@ class SessionStatusResponse(BaseModel):
     test_cases_count: int = 0
     current_step: str = ""
     last_message: str = ""
+    questionnaire_questions: list[dict] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -160,6 +163,9 @@ class PastSession(BaseModel):
     updated_at: str
     has_feature_files: bool
     has_playwright: bool
+    has_execution: bool = False
+    execution_status: str | None = None
+    has_load_tests: bool = False
 
 
 class PastSessionTestCasesResponse(BaseModel):

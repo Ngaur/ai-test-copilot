@@ -19,7 +19,7 @@ export default function ReportViewer() {
   const handleRun = async () => {
     if (!session?.threadId || isRunning) return;
     try {
-      await executeTests(session.threadId);
+      await executeTests(session.threadId, session.sessionId ?? "");
       // Backend immediately updates state to "executing" and adds a chat message.
       // Update local status so the "improving" watcher in Home.tsx restarts polling.
       updateStatus("executing");

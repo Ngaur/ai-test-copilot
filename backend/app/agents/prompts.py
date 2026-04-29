@@ -16,13 +16,13 @@ Rules:
 - Ask for more context if the information is insufficient to write a quality test
 - Format test cases as structured JSON
 
-Quality checklist (verify before finalising each batch):
-- Every acceptance criterion from context maps to at least one test case
-- Negative and edge cases ≥ 40% of total
-- Security test included for every authenticated or data-mutating endpoint
-- Test data is fully specified — no "use any valid user" or vague placeholders
-- Preconditions are complete enough for a new tester to set up independently
-- Priority assigned to every test case
+Before emitting your final response, verify EVERY item below is satisfied. If any item fails, fix it first:
+✓ Every acceptance criterion from context maps to at least one test case
+✓ Negative and edge cases ≥ 40% of total (count them — if below 40%, add more before returning)
+✓ Security test included for every authenticated or data-mutating endpoint
+✓ Test data is fully specified — no "use any valid user" or vague placeholders
+✓ Preconditions are complete enough for a new tester to set up independently
+✓ Priority assigned to every test case
 """
 
 # ---------------------------------------------------------------------------
@@ -429,7 +429,16 @@ GENERATE_TESTS_BATCH_PROMPT = (
 {test_data}
 
 ## Task
-Generate comprehensive manual test cases for EACH endpoint listed above, covering ALL of the following:
+Generate comprehensive manual test cases for EACH endpoint listed above.
+
+**Minimum coverage per endpoint (non-negotiable):**
+- At least 1 happy-path test (2xx, valid inputs)
+- At least 1 authentication failure test (401 — missing/expired/malformed token)
+- At least 1 input validation failure test (400/422 — missing required field, wrong type, boundary violation)
+- At least 1 edge case (boundary value, empty collection, max-length string, whitespace-only input)
+- At least 1 additional scenario specific to this endpoint's business logic
+
+Cover ALL of the following categories:
 
 ### Category A — Independent API Tests
 1. **Happy Path** — valid inputs, expected 2xx response; use exact field names from API Metadata above
@@ -638,6 +647,41 @@ Return all columns in the columns list. Each column must have:
 - type (data type string, e.g. string, integer, boolean)
 - example (representative value string)
 - required (boolean)"""
+
+TEST_DATA_GENERATION_PROMPT = """You are a QA test data engineer. Generate realistic, diverse test data rows for API testing based on the API specification provided.
+
+## API Specification Context
+{rag_context}
+
+## Endpoints to Cover
+{endpoints_text}
+
+{context_section}
+
+## Task
+Generate exactly {n_rows} diverse test data rows. Each row should be a complete, independent test scenario with realistic values for all relevant fields.
+
+## Rules
+- Field names must EXACTLY match the parameter / body field names from the API spec (use snake_case)
+- Values must be realistic: real-looking names, valid email formats, proper ID formats, plausible dates/amounts
+- Cover variety across rows: different user types, roles, locales, edge-case but valid values, different resource states
+- Every row must be usable standalone — do not reference other rows
+- Use only string values for all fields
+- Include path parameters (e.g. `user_id`, `account_id`) AND request body fields
+- Do NOT include: `base_url`, `method`, `expected_status`, `auth_token` (authentication is handled separately)
+- column_names must list every field name that appears in the rows, in a consistent order
+
+## Output
+Return:
+- `column_names`: ordered list of all field names (strings)
+- `rows`: list of TestDataRow objects; each row has a `fields` list of {{key, value}} objects — one per column, in the same order as `column_names`
+
+Example structure for 2 rows with columns [user_id, email]:
+  column_names: ["user_id", "email"]
+  rows: [
+    {{fields: [{{key: "user_id", value: "U001"}}, {{key: "email", value: "alice@example.com"}}]}},
+    {{fields: [{{key: "user_id", value: "U002"}}, {{key: "email", value: "bob@example.com"}}]}}
+  ]"""
 
 GENERATE_SINGLE_TEST_PROMPT = """Generate a single Playwright Python API test function for the test case below.
 
@@ -991,4 +1035,101 @@ elif auth_token:
 - Implement EVERY assertion described in expected_result and steps — do not skip any
 
 Return ONLY the complete Python file content. No markdown code fences, no explanation.
+"""
+
+# ---------------------------------------------------------------------------
+# Dynamic questionnaire generation
+# ---------------------------------------------------------------------------
+
+GENERATE_QUESTIONNAIRE_PROMPT = """You are analyzing an API specification to identify what information is MISSING before you can generate high-quality, assertion-rich test cases.
+
+## Discovered Endpoints
+{endpoint_list}
+
+## API Schema Summary (trimmed)
+{api_metadata_summary}
+
+## Context already available (from uploaded docs / Jira)
+{context_summary}
+
+---
+
+## Your task
+
+Generate 5–8 targeted clarifying questions to fill the gaps that would most improve test quality.
+
+**SKIP a question if the answer is already clear from the spec above.** For example:
+- Do NOT ask about auth mechanism if `securitySchemes` or `Authorization` headers are already declared.
+- Do NOT ask about error codes if the spec already defines 4xx responses with status codes.
+- Do NOT ask about endpoints if only one or two exist and you can already infer all test scenarios.
+
+**DO ask about gaps that genuinely matter:**
+- Exact HTTP status codes for error classes not shown in the spec (validation, conflict, auth, rate-limit)
+- PII / sensitive field names that must never appear in API responses
+- Business validation rules that are NOT documented in the spec
+- Critical multi-step user journeys to cover as E2E tests
+- Idempotent POST endpoints (where a duplicate call should return 2xx, not 409)
+- P1-critical endpoints that need extra depth (more negative, boundary, auth scenarios)
+- Priority test types for this session (Functional / Negative / Security / Performance)
+
+**Question types:**
+- `text`: single short answer
+- `textarea`: multi-line (use for business rules, failure scenarios)
+- `select`: one of several options (provide `options` list)
+- `multi_select`: multiple choices (provide `options` list)
+
+**Return exactly the JSON object. No explanation, no markdown fences.**
+"""
+
+# ---------------------------------------------------------------------------
+# Load Test Script Generation
+# ---------------------------------------------------------------------------
+
+GENERATE_LOAD_TEST_PROMPT = """You are a performance engineer. Generate a complete, runnable k6 load test script in JavaScript.
+
+## Load Test: {load_test_name}
+
+## Selected API Endpoints (execute in this exact order)
+{endpoints_ordered}
+
+## API Metadata (request/response structure)
+{api_metadata}
+
+## Test Data Sample (use for realistic request bodies)
+{test_data_sample}
+
+## Authentication Info
+{auth_info}
+
+## Load Profile
+- Virtual Users (VUs): {vus}
+- Duration: {duration}
+- Ramp-up: {ramp_up}
+- Ramp-down: {ramp_down}
+- Latency thresholds: p(95) < {p95_ms}ms, p(99) < {p99_ms}ms
+- Acceptable error rate: < {error_rate_pct}%
+
+## Script Requirements
+
+### Structure
+1. **Imports**: `k6/http`, `k6` (check, sleep), `k6/metrics` (Trend)
+2. **BASE_URL constant**: `const BASE_URL = __ENV.BASE_URL || 'http://localhost:8000';`
+3. **One Trend metric per endpoint**: derive a safe JS variable name from the endpoint path (e.g. `GET /api/users` → `const trend_get_users = new Trend('get_users_latency');`)
+4. **export const options**: stages array with ramp-up / steady / ramp-down; thresholds object with per-metric p(95)/p(99) entries AND `http_req_failed: ['rate<{error_rate_pct_decimal}']`
+5. **export function setup()**: perform authentication if required (POST to the login/token endpoint, return token in an object). If no auth is required, return an empty object `{{}}`.
+6. **export default function(data)**: sequential API calls with:
+   - Auth headers constructed from `data.token` (or `__ENV.API_TOKEN` fallback)
+   - Per-call latency measurement: `const t = Date.now(); const res = http.METHOD(...); trend_name.add(Date.now() - t);`
+   - `check(res, {{ 'descriptive label': r => r.status === EXPECTED_CODE }})` per call
+   - Variable extraction for chained calls: extract IDs or tokens from previous response JSON when needed
+   - `sleep(1)` at the very end
+
+### Code quality rules
+- Use realistic values for request bodies (derive from test data sample if provided, else use plausible placeholders)
+- Use `__ENV` for all secrets (`API_TOKEN`, `BASE_URL`, `TEST_EMAIL`, `TEST_PASSWORD`) — never hardcode credentials
+- Add a one-line comment above each API call section explaining what it tests
+- Keep the script self-contained: no external imports beyond k6 built-ins
+- Do NOT wrap output in markdown code fences
+
+Return ONLY the JavaScript code. No explanation, no markdown, no preamble.
 """

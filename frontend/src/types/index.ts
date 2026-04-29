@@ -10,6 +10,7 @@ export type SessionStatus =
   | "awaiting_test_data"
   | "generating_automation"
   | "awaiting_playwright_confirmation"
+  | "awaiting_load_test_config"
   | "ready_to_execute"
   | "executing"
   | "done"
@@ -64,6 +65,15 @@ export interface QuestionnaireAnswers {
   };
 }
 
+export interface QuestionnaireQuestion {
+  id: string;
+  question: string;
+  type: "text" | "textarea" | "select" | "multi_select";
+  options?: string[];
+  hint?: string;
+  category?: string;
+}
+
 export interface ChatMessage {
   role: "user" | "assistant";
   content: string;
@@ -84,4 +94,34 @@ export interface PastSession {
   updated_at: string;
   has_feature_files: boolean;
   has_playwright: boolean;
+  has_execution: boolean;
+  execution_status: string | null;
+  has_load_tests: boolean;
+}
+
+export interface LoadTestConfig {
+  name: string;
+  selectedEndpoints: string[];
+  vus: number;
+  duration: string;
+  rampUp: string;
+  rampDown: string;
+  p95Ms: number;
+  p99Ms: number;
+  errorRatePct: number;
+}
+
+export interface LoadTest {
+  id: string;
+  name: string;
+  endpoints: string[];
+  file_path: string;
+  content: string;
+  vus: number;
+  duration: string;
+  ramp_up?: string;
+  ramp_down?: string;
+  p95_ms?: number;
+  p99_ms?: number;
+  error_rate_pct?: number;
 }

@@ -45,6 +45,9 @@ class TestCopilotState(TypedDict):
     # Automation
     generated_test_file: str | None  # path to generated pytest file
 
+    # Load test scripts (multiple per session)
+    load_tests: list[dict[str, Any]]  # [{id, name, endpoints, file_path, vus, duration, ...}]
+
     # Execution
     execution_status: str | None  # running | passed | failed | error
     execution_log: list[str]
@@ -52,6 +55,8 @@ class TestCopilotState(TypedDict):
 
     # Intake questionnaire (collected after indexing, before generation)
     questionnaire_answers: dict[str, Any]
+    # LLM-generated targeted questions (replaces the static 14-question form)
+    questionnaire_questions: list[dict[str, Any]]
 
     # Flow control
     current_step: str

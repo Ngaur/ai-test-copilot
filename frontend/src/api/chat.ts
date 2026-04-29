@@ -1,5 +1,5 @@
 import client from "./client";
-import type { QuestionnaireAnswers, SessionStatus, TestCase } from "@/types";
+import type { LoadTest, LoadTestConfig, QuestionnaireQuestion, SessionStatus, TestCase } from "@/types";
 
 export interface StartSessionResponse {
   thread_id: string;
@@ -12,6 +12,7 @@ export interface ReviewRequest {
   thread_id: string;
   approved: boolean;
   feedback?: string;
+  test_cases?: TestCase[];
 }
 
 export interface ReviewResponse {
@@ -27,6 +28,7 @@ export interface StatusResponse {
   test_cases_count: number;
   current_step: string;
   last_message: string;
+  questionnaire_questions?: QuestionnaireQuestion[];
 }
 
 export const uploadDocument = async (file: File) => {
@@ -117,8 +119,8 @@ export const downloadTestCases = async (threadId: string): Promise<void> => {
   URL.revokeObjectURL(url);
 };
 
-export const executeTests = async (threadId: string) => {
-  const res = await client.post(`/chat/${threadId}/execute`);
+export const executeTests = async (threadId: string, sessionId: string) => {
+  const res = await client.post(`/chat/${threadId}/execute?session_id=${sessionId}`);
   return res.data;
 };
 
@@ -142,18 +144,85 @@ export const skipPlaywright = async (threadId: string) => {
   return res.data as { thread_id: string; status: SessionStatus; message: string };
 };
 
+export interface GeneratedTestData {
+  thread_id: string;
+  rows_generated: number;
+  column_names: string[];
+  data: Record<string, string>[];
+  message: string;
+}
+
+export const generateTestData = async (threadId: string, nRows: number = 6): Promise<GeneratedTestData> => {
+  const res = await client.post(`/chat/${threadId}/generate-test-data?n_rows=${nRows}`);
+  return res.data;
+};
+
+export const downloadGeneratedTestData = async (threadId: string): Promise<void> => {
+  const res = await client.get(`/chat/${threadId}/test-data/export`, { responseType: "blob" });
+  const url = URL.createObjectURL(new Blob([res.data]));
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `test_data_${threadId.slice(0, 8)}.xlsx`;
+  a.click();
+  URL.revokeObjectURL(url);
+};
+
 export const generateReport = async () => {
   const res = await client.get("/report/generate");
   return res.data as { report_url: string };
 };
 
+export interface ReportSummary {
+  statistic: {
+    passed: number;
+    failed: number;
+    broken: number;
+    skipped: number;
+    unknown: number;
+    total: number;
+  };
+  time: { start: number; stop: number; duration: number };
+}
+
+export const getReportSummary = async (sessionId: string): Promise<ReportSummary> => {
+  const res = await client.get(`/report/summary/${sessionId}`);
+  return res.data;
+};
+
 export const submitQuestionnaire = async (
   threadId: string,
-  answers: QuestionnaireAnswers,
+  answers: Record<string, unknown>,
 ): Promise<{ thread_id: string; status: string; message: string }> => {
   const res = await client.post(`/chat/${threadId}/questionnaire`, {
     thread_id: threadId,
     answers,
   });
   return res.data;
+};
+
+export const generateLoadTest = async (
+  threadId: string,
+  config: LoadTestConfig,
+): Promise<LoadTest> => {
+  const res = await client.post(`/chat/${threadId}/generate-load-test`, {
+    name: config.name,
+    selected_endpoints: config.selectedEndpoints,
+    vus: config.vus,
+    duration: config.duration,
+    ramp_up: config.rampUp,
+    ramp_down: config.rampDown,
+    p95_ms: config.p95Ms,
+    p99_ms: config.p99Ms,
+    error_rate_pct: config.errorRatePct,
+  });
+  return res.data;
+};
+
+export const getLoadTests = async (threadId: string): Promise<{ load_tests: LoadTest[] }> => {
+  const res = await client.get(`/chat/${threadId}/load-tests`);
+  return res.data;
+};
+
+export const skipLoadTest = async (threadId: string): Promise<void> => {
+  await client.post(`/chat/${threadId}/skip-load-test`);
 };

@@ -40,6 +40,10 @@ class Settings(BaseSettings):
     # Batch generation — endpoints per LLM call for structured files (Postman / OpenAPI)
     endpoint_batch_size: int = 5
 
+    # Output token budgets — prevents "length" finish_reason errors
+    llm_max_tokens_test_gen: int = 8000    # test case JSON generation (batch + workflow + improve)
+    llm_max_tokens_codegen: int = 16000   # Gherkin feature files + Playwright code generation
+
     # File uploads
     upload_dir: str = "data/uploads"
     max_upload_size_mb: int = 20

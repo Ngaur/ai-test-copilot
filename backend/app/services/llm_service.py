@@ -28,7 +28,7 @@ def _sync_http_client() -> httpx.Client:
     return httpx.Client(http2=_is_deploy())
 
 
-def get_llm() -> ChatOpenAI:
+def get_llm(max_tokens=None, temperature=None) -> ChatOpenAI:
     # if _is_ollama():
     #     return ChatOpenAI(
     #         model=settings.llm_model,
@@ -37,20 +37,22 @@ def get_llm() -> ChatOpenAI:
     #         # temperature=settings.llm_temperature,
     #         # async_client=_async_http_client(),
     #         # http_client=_sync_http_client(),
-    #         streaming=True,
     #     )
-    return ChatOpenAI(
+    kwargs: dict = dict(
         model=settings.llm_model,
         #base_url=settings.llm_base_url,
         api_key=settings.llm_api_key,
-        temperature=settings.llm_temperature,
+        temperature=temperature if temperature is not None else settings.llm_temperature,
         # async_client=_async_http_client(),
         # http_client=_sync_http_client(),
-        streaming=True,
+        streaming=False,  # .invoke() is used everywhere; streaming adds connection overhead with no benefit
     )
+    if max_tokens is not None:
+        kwargs["max_tokens"] = max_tokens
+    return ChatOpenAI(**kwargs)
 
 
-def get_embeddings() -> OpenAIEmbeddings:
+def get_embeddings():
     if _is_ollama():
         print("I am running via Ollama!")
         return OllamaEmbeddings(
